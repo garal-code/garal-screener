@@ -570,6 +570,79 @@ class TestFronteraEficiente:
             "CCC": pytest.approx(0.5),
         }
 
+    def test_detalle_del_calculo(self, auth_client):
+        cartera_id = self._crear_cartera(auth_client, self.POSICIONES)
+        series = self._series_completas(self.POSICIONES)
+        with self._mock_precios(self.POSICIONES, series)[0]:
+            r = auth_client.get(
+                f"{BASE}/carteras/{cartera_id}/frontera-eficiente",
+                params={"anios": 5, "puntos": 10},
+            )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        tickers = data["tickers"]
+        n_activos, n_meses = len(tickers), data["n_observaciones"]
+        detalle = data["detalle"]
+
+        # Datos de entrada: un cierre más que rentabilidades (meses consecutivos)
+        datos = detalle["datos"]
+        assert len(datos["fechas"]) == n_meses == 60
+        assert datos["fechas"][0] == "2021-10-01"
+        assert datos["fechas"][-1] == "2026-09-01"
+        assert len(datos["fechas_precios"]) == n_meses + 1
+        assert datos["fechas_precios"][0] == data["fecha_inicio"]
+        assert datos["fechas_precios"][1:] == datos["fechas"]
+        precios_matriz = np.array(datos["precios"])
+        rentabilidades = np.array(datos["rentabilidades"])
+        assert precios_matriz.shape == (n_meses + 1, n_activos)
+        assert rentabilidades.shape == (n_meses, n_activos)
+        for j, ticker in enumerate(tickers):
+            np.testing.assert_allclose(
+                precios_matriz[:, j], [p for _, p in series[ticker]]
+            )
+        np.testing.assert_allclose(
+            rentabilidades, precios_matriz[1:] / precios_matriz[:-1] - 1
+        )
+        np.testing.assert_allclose(
+            data["rentabilidades_esperadas"], rentabilidades.mean(axis=0)
+        )
+
+        # Estadísticas por activo
+        estadisticas = detalle["estadisticas"]
+        np.testing.assert_allclose(
+            estadisticas["varianzas"], rentabilidades.var(axis=0, ddof=1)
+        )
+        np.testing.assert_allclose(
+            estadisticas["volatilidades"], rentabilidades.std(axis=0, ddof=1)
+        )
+        correlaciones = np.array(estadisticas["matriz_correlaciones"])
+        assert correlaciones.shape == (n_activos, n_activos)
+        np.testing.assert_allclose(
+            correlaciones, np.corrcoef(rentabilidades, rowvar=False)
+        )
+
+        # Cartera actual: valores EUR y serie mensual = pesos · rentabilidades
+        actual = detalle["cartera_actual"]
+        assert actual["valores_eur"] == {
+            "AAA": pytest.approx(1000.0),
+            "BBB": pytest.approx(1000.0),
+            "CCC": pytest.approx(2000.0),
+        }
+        pesos = np.array([data["cartera_actual"]["pesos"][t] for t in tickers])
+        assert len(actual["rentabilidades"]) == n_meses
+        np.testing.assert_allclose(actual["rentabilidades"], rentabilidades @ pesos)
+        assert np.mean(actual["rentabilidades"]) == pytest.approx(
+            data["cartera_actual"]["rentabilidad"]
+        )
+
+        # Cada punto expone su varianza (= volatilidad²)
+        for punto in [
+            *data["frontera"],
+            data["cartera_minima_varianza"],
+            data["cartera_actual"],
+        ]:
+            assert punto["varianza"] == pytest.approx(punto["volatilidad"] ** 2)
+
     def test_historico_corto_o_inexistente_se_excluye_y_se_informa(self, auth_client):
         posiciones = {
             **self.POSICIONES,

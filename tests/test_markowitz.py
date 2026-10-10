@@ -14,11 +14,13 @@ import pytest
 from app.services.markowitz import (
     DatosInsuficientesError,
     EstadisticasActivos,
+    alinear_precios_mensuales,
     calcular_cartera_minima_varianza,
     calcular_estadisticas_activos,
     calcular_frontera_eficiente,
     calcular_rentabilidades_mensuales,
     evaluar_cartera,
+    rentabilidades_cartera,
     separar_historicos_cortos,
 )
 
@@ -310,3 +312,106 @@ class TestSepararHistoricosCortos:
         )
         assert suficientes == {}
         assert cortos == ["A"]
+
+
+# ── Detalle del cálculo ───────────────────────────────────────────────────────
+
+
+class TestAlinearPreciosMensuales:
+    def test_meses_consecutivos_tienen_un_precio_mas_que_rentabilidades(self):
+        precios = {
+            "A": _serie(PRECIOS_A),
+            "B": _serie(PRECIOS_B),
+        }
+        r = calcular_rentabilidades_mensuales(precios)
+        fechas_precios, matriz = alinear_precios_mensuales(precios, r)
+
+        assert fechas_precios == _meses(13)
+        assert len(fechas_precios) == len(r.fechas) + 1
+        assert matriz.shape == (13, 2)
+        np.testing.assert_allclose(matriz[:, 0], PRECIOS_A)
+        np.testing.assert_allclose(matriz[:, 1], PRECIOS_B)
+        # Cada rentabilidad sale de dos cierres consecutivos del eje de precios
+        np.testing.assert_allclose(r.matriz, matriz[1:] / matriz[:-1] - 1)
+
+    def test_con_huecos_incluye_el_mes_anterior_de_cada_rentabilidad(self):
+        meses = _meses(5)
+        precios = {
+            "A": list(zip(meses, [100.0, 110.0, 121.0, 133.1, 146.41], strict=True)),
+            "B": [
+                (m, p)
+                for m, p in zip(meses, [10.0, 11.0, 0, 13.0, 14.3], strict=True)
+                if p
+            ],
+        }
+        r = calcular_rentabilidades_mensuales(precios)
+        fechas_precios, matriz = alinear_precios_mensuales(precios, r)
+
+        # Rentabilidades de feb y may: precios de ene, feb, abr y may
+        assert r.fechas == [date(2020, 2, 1), date(2020, 5, 1)]
+        assert fechas_precios == [
+            date(2020, 1, 1),
+            date(2020, 2, 1),
+            date(2020, 4, 1),
+            date(2020, 5, 1),
+        ]
+        np.testing.assert_allclose(
+            matriz, [[100.0, 10.0], [110.0, 11.0], [133.1, 13.0], [146.41, 14.3]]
+        )
+
+
+class TestEstadisticasDescriptivas:
+    def test_varianza_volatilidad_y_correlaciones(self):
+        precios = {
+            "A": _serie(PRECIOS_A),
+            "B": _serie(PRECIOS_B),
+            "C": _serie(PRECIOS_C),
+        }
+        r = calcular_rentabilidades_mensuales(precios)
+        est = calcular_estadisticas_activos(precios)
+
+        np.testing.assert_allclose(est.varianzas, r.matriz.var(axis=0, ddof=1))
+        np.testing.assert_allclose(est.volatilidades, r.matriz.std(axis=0, ddof=1))
+        correlaciones = est.matriz_correlaciones
+        np.testing.assert_allclose(np.diag(correlaciones), 1.0)
+        np.testing.assert_allclose(correlaciones, correlaciones.T)
+        np.testing.assert_allclose(correlaciones, np.corrcoef(r.matriz, rowvar=False))
+
+    def test_activo_sin_variacion_no_produce_valores_no_finitos(self):
+        precios = {"A": _serie(PRECIOS_A), "B": _serie([10.0] * 13)}
+        est = calcular_estadisticas_activos(precios)
+        correlaciones = est.matriz_correlaciones
+        assert np.all(np.isfinite(correlaciones))
+        np.testing.assert_allclose(correlaciones, [[1.0, 0.0], [0.0, 1.0]])
+
+
+class TestRentabilidadesCartera:
+    def test_serie_mensual_es_pesos_por_rentabilidades(self):
+        precios = {"A": _serie(PRECIOS_A), "B": _serie(PRECIOS_B)}
+        r = calcular_rentabilidades_mensuales(precios)
+        serie = rentabilidades_cartera(r, {"A": 0.25, "B": 0.75})
+        assert serie.shape == (12,)
+        np.testing.assert_allclose(serie, r.matriz @ np.array([0.25, 0.75]))
+
+    def test_media_coincide_con_la_rentabilidad_de_la_cartera(self):
+        precios = {
+            "A": _serie(PRECIOS_A),
+            "B": _serie(PRECIOS_B),
+            "C": _serie(PRECIOS_C),
+        }
+        r = calcular_rentabilidades_mensuales(precios)
+        est = calcular_estadisticas_activos(precios)
+        punto = evaluar_cartera(est, {"A": 1.0, "B": 2.0, "C": 1.0})
+        serie = rentabilidades_cartera(r, punto.pesos)
+        assert serie.mean() == pytest.approx(punto.rentabilidad)
+        assert serie.var(ddof=1) == pytest.approx(punto.varianza)
+
+
+class TestPuntoCarteraVarianza:
+    def test_varianza_es_el_cuadrado_de_la_volatilidad(self, estadisticas_hoja):
+        frontera = calcular_frontera_eficiente(estadisticas_hoja, n_puntos=5)
+        for punto in [*frontera.puntos, frontera.cartera_minima_varianza]:
+            assert punto.varianza == pytest.approx(punto.volatilidad**2)
+        assert frontera.cartera_minima_varianza.varianza == pytest.approx(
+            0.000531617, rel=1e-4
+        )

@@ -201,11 +201,21 @@ class AnalisisCartera(BaseModel):
 
 
 class PuntoCarteraOut(BaseModel):
-    # Rentabilidad y volatilidad mensuales (sin anualizar)
-    rentabilidad: float
-    volatilidad: float
-    # Peso de cada ticker en [0, 1]; suman 1
-    pesos: dict[str, float]
+    # Cifras mensuales (sin anualizar)
+    rentabilidad: float = Field(
+        description=(
+            "Rentabilidad mensual esperada (w·mu). En los puntos de la frontera es "
+            "la rentabilidad objetivo para la que se minimizó la varianza."
+        )
+    )
+    volatilidad: float = Field(description="Desviación típica mensual: sqrt(varianza)")
+    varianza: float = Field(description="Varianza mensual de la cartera: wᵀΣw")
+    pesos: dict[str, float] = Field(
+        description=(
+            "Peso de cada ticker; suman 1. En [0, 1] salvo en la referencia con "
+            "ventas en corto, donde pueden ser negativos."
+        )
+    )
 
 
 # Por qué una posición abierta queda fuera del análisis:
@@ -222,6 +232,69 @@ class ActivoExcluido(BaseModel):
     # Ticker (o ISIN si el instrumento no tiene ticker)
     ticker: str
     motivo: MotivoExclusion
+
+
+class DatosEntradaFrontera(BaseModel):
+    """Series mensuales usadas en el cálculo; columnas en el orden de `tickers`."""
+
+    fechas_precios: list[date] = Field(
+        description=(
+            "Meses (día 1) de los cierres usados: cada mes de `fechas` y su mes "
+            "anterior. Con meses consecutivos tiene un elemento más que `fechas`."
+        )
+    )
+    precios: list[list[float]] = Field(
+        description=(
+            "Cierre ajustado mensual en moneda nativa: filas = `fechas_precios`, "
+            "columnas = `tickers`."
+        )
+    )
+    fechas: list[date] = Field(
+        description="Meses (día 1) de cada rentabilidad; n_observaciones elementos"
+    )
+    rentabilidades: list[list[float]] = Field(
+        description=(
+            "Rentabilidad simple mensual: filas = `fechas`, columnas = `tickers`. "
+            "La de un mes es cierre del mes / cierre del mes anterior - 1."
+        )
+    )
+
+
+class EstadisticasActivosOut(BaseModel):
+    """Estadísticas por activo en el orden de `tickers` (media y covarianza en la raíz)."""
+
+    varianzas: list[float] = Field(
+        description="Varianza muestral (n-1) mensual: diagonal de la covarianza"
+    )
+    volatilidades: list[float] = Field(
+        description="Desviación típica muestral (n-1) mensual: sqrt(varianza)"
+    )
+    matriz_correlaciones: list[list[float]] = Field(
+        description="Correlaciones derivadas de la covarianza: Σij / (σi·σj)"
+    )
+
+
+class DetalleCarteraActual(BaseModel):
+    valores_eur: dict[str, float] = Field(
+        description=(
+            "Valor de mercado EUR de cada posición incluida; de él salen los pesos "
+            "de `cartera_actual`"
+        )
+    )
+    rentabilidades: list[float] = Field(
+        description=(
+            "Rentabilidad mensual de la cartera actual en cada mes de `fechas`: "
+            "pesos · rentabilidades del mes"
+        )
+    )
+
+
+class DetalleCalculoFrontera(BaseModel):
+    """Cómo se ha calculado el resultado, paso a paso (como la hoja de referencia)."""
+
+    datos: DatosEntradaFrontera
+    estadisticas: EstadisticasActivosOut
+    cartera_actual: DetalleCarteraActual
 
 
 class FronteraEficienteCartera(BaseModel):
@@ -243,3 +316,4 @@ class FronteraEficienteCartera(BaseModel):
     # Fracción [0, 1] del valor EUR de la cartera que queda fuera del análisis
     # (posiciones sin precio actual no tienen valor conocido y no cuentan)
     peso_excluido: float
+    detalle: DetalleCalculoFrontera

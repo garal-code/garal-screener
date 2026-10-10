@@ -62,10 +62,11 @@ cannot be done for the real portfolio inside the product.
 - [x] T1 — Historical monthly price series: batch fetch of adjusted monthly closes in `app/services/precios.py` + tests with mocked yfinance.
 - [x] T2 — Pure Markowitz math service `app/services/markowitz.py` (returns, covariance, min-variance, long-only frontier via scipy SLSQP, portfolio stats) + deterministic tests (spreadsheet data as fixture; closed-form oracle for unconstrained case) + `numpy`/`scipy` in `requirements.txt`.
 - [x] T3 — Endpoint + schemas in `app/routers/posiciones.py` / `app/schemas.py`, wiring positions -> weights -> service, API tests (owner, foreign 404, insufficient data 400, provider failure 503, current month excluded, short-history ticker excluded). Includes review follow-ups: distinguish provider failure from no data in `obtener_precios_mensuales_batch`; end the window at the last completed month.
+- [x] T4 — Calculation transparency (user request 2026-10-04, after reviewing the PRs): extend the frontier response so the frontend can show how the result was computed, like the reference spreadsheet: (1) inputs: months used, monthly adjusted close per asset, monthly return matrix; (2) per-asset stats: expected return, variance, volatility, correlation matrix; (3) current portfolio: EUR value per position and the portfolio's monthly return series; (4) frontier points: target return, variance, volatility, weights; (5) ~~short-selling reference~~ (removed by user decision, see Progress). Always included, no extra query param. Delivered as a PR stacked on #26 (`feat/markowitz-04-detalle-calculo`).
 
 ## Route declaration
 
-- T1–T3: delegated direct (one writer). Trigger: writer trigger (2+ non-trivial files) and preparation trigger (reading routers/services/tests to prepare writes).
+- T1–T4: delegated direct (one writer). Trigger: writer trigger (2+ non-trivial files) and preparation trigger (reading routers/services/tests to prepare writes).
 
 ## Checks
 
@@ -169,6 +170,43 @@ cannot be done for the real portfolio inside the product.
   tests/test_precios.py tests/test_markowitz.py -q` -> 151 passed; `make check` -> ruff/black/mypy clean,
   205 passed.
 
+- 2026-10-04 T4 done (delegated writer), commit `feat(posiciones)` on `feat/markowitz-04-detalle-calculo`
+  (see `git log`). Additive: every existing response field keeps its name and shape.
+  - `markowitz.py` (pure): `calcular_estadisticas_desde_rentabilidades` (returns computed once and reused),
+    `alinear_precios_mensuales` (price axis = each return month plus its previous month, so with consecutive
+    months it has exactly one more element), `rentabilidades_cartera` (w·r per month, the spreadsheet's
+    PORTFOLIO column), `EstadisticasActivos.varianzas/volatilidades/matriz_correlaciones` (correlation 0
+    off-diagonal for a zero-variance asset, never NaN), `PuntoCartera.varianza`, and
+    `calcular_referencia_con_cortos` -> `ReferenciaConCortos` (S^-1, A, B, D, AD-B^2, unconstrained
+    min-variance S^-1 1 / D) or None under the existing singularity criterion.
+  - Router: `_calcular_frontera` (threadpool) now returns `_ResultadoFrontera` with all of the above; the
+    handler only maps to schemas.
+  - Response: every point (`frontera[]`, `cartera_minima_varianza`, `cartera_actual`) gains `varianza`;
+    `rentabilidad` documented as the target return on frontier points. New `detalle`:
+    `datos {fechas_precios, precios[fechas_precios x tickers], fechas, rentabilidades[fechas x tickers]}`,
+    `estadisticas {varianzas, volatilidades, matriz_correlaciones}` (means/covariance stay at the root),
+    `cartera_actual {valores_eur, rentabilidades[fechas]}`,
+    `referencia_con_cortos {matriz_covarianzas_inversa, a, b, d, a_d_menos_b2, cartera_minima_varianza} | null`.
+  - Spreadsheet oracle: D = 1881.054 (matches); the fixture's mu is rounded, so A and B are asserted
+    against the recomputation (1.5351 / 44.693 vs the sheet's 1.5397 / 44.597); unconstrained weights
+    (0.1325, 0.1674, 0.3193, 0.2491, 0.1317), variance 0.000531617.
+  RED: `tests/test_markowitz.py` collection ImportError (`alinear_precios_mensuales`,
+  `calcular_referencia_con_cortos`, `rentabilidades_cartera` missing); `test_detalle_del_calculo` failed
+  with KeyError `detalle`. GREEN: `.venv/bin/python -m pytest tests/test_api.py tests/test_precios.py
+  tests/test_markowitz.py -q` -> 162 passed; `make check` -> ruff/black/mypy clean, 216 passed.
+
+- 2026-10-04 decision (user): short selling will never be part of the analysis, so the
+  short-selling reference (T4 item 5: `referencia_con_cortos`, `ReferenciaConCortos`,
+  `calcular_referencia_con_cortos`, `ReferenciaConCortosOut`) was removed from the API and the
+  service. The closed form remains only inside the T2 oracle test (computed locally in the test).
+  `make check`: ruff/black/mypy clean, 213 passed. Delivered in #27.
+- 2026-10-04 PRs: #23 merged; #24 retargeted to `develop` automatically; #27 opened for T4;
+  #28 (`chore/serena-project-config`) holds the Serena-regenerated `.serena/project.yml`.
+- 2026-10-04 RDD: full chain (old develop..2012f86) approved (`review-c4db9f224d6799ed`). Follow-up
+  WARNING: `app/services/precios.py:371-390` partial provider failure is reported as `sin_historico`.
+
 ## Next step
 
-User reviews and merges #23 -> #24 -> #25 -> #26 in order. Frontend chart in `investment-portfolio-ui` is a separate future feature.
+User merges #24 -> #25 -> #26 -> #27 bottom-up, deleting each merged branch so GitHub retargets the
+next PR to `develop`; #28 is independent. Follow-ups: partial provider failure motivo; polish the
+detail block as the frontend needs it; frontend chart in `investment-portfolio-ui`.

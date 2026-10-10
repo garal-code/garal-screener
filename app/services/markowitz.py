@@ -59,6 +59,37 @@ class EstadisticasActivos:
     matriz_covarianzas: Matriz
     n_observaciones: int
 
+    @property
+    def varianzas(self) -> Vector:
+        """Varianza muestral (n-1) de cada activo: diagonal de la covarianza."""
+        varianzas: Vector = np.diag(self.matriz_covarianzas).copy()
+        return varianzas
+
+    @property
+    def volatilidades(self) -> Vector:
+        """Desviación típica muestral (n-1) de cada activo."""
+        volatilidades: Vector = np.sqrt(np.maximum(self.varianzas, 0.0))
+        return volatilidades
+
+    @property
+    def matriz_correlaciones(self) -> Matriz:
+        """
+        Correlaciones derivadas de la covarianza: Σij / (σi·σj).
+
+        Un activo sin variación (σ = 0) no tiene correlación definida: se
+        devuelve 0 con el resto (y 1 en la diagonal) para no emitir NaN.
+        """
+        volatilidades = self.volatilidades
+        denominador = np.outer(volatilidades, volatilidades)
+        correlaciones: Matriz = np.divide(
+            self.matriz_covarianzas,
+            denominador,
+            out=np.zeros_like(self.matriz_covarianzas),
+            where=denominador > 0,
+        )
+        np.fill_diagonal(correlaciones, 1.0)
+        return correlaciones
+
 
 @dataclass(frozen=True)
 class PuntoCartera:
@@ -67,6 +98,10 @@ class PuntoCartera:
     rentabilidad: float
     volatilidad: float
     pesos: dict[str, float]
+
+    @property
+    def varianza(self) -> float:
+        return self.volatilidad**2
 
 
 @dataclass(frozen=True)
@@ -127,7 +162,16 @@ def calcular_estadisticas_activos(
     Lanza DatosInsuficientesError si hay menos de 2 activos con histórico o
     menos de `min_observaciones` meses comunes.
     """
-    rentabilidades = calcular_rentabilidades_mensuales(precios)
+    return calcular_estadisticas_desde_rentabilidades(
+        calcular_rentabilidades_mensuales(precios), min_observaciones
+    )
+
+
+def calcular_estadisticas_desde_rentabilidades(
+    rentabilidades: RentabilidadesMensuales,
+    min_observaciones: int = MIN_OBSERVACIONES,
+) -> EstadisticasActivos:
+    """Como `calcular_estadisticas_activos`, partiendo de rentabilidades ya alineadas."""
     _validar_numero_activos(len(rentabilidades.tickers))
     n_observaciones = len(rentabilidades.fechas)
     if n_observaciones < min_observaciones:
@@ -143,6 +187,38 @@ def calcular_estadisticas_activos(
         ),
         n_observaciones=n_observaciones,
     )
+
+
+def alinear_precios_mensuales(
+    precios: dict[str, list[tuple[date, float]]],
+    rentabilidades: RentabilidadesMensuales,
+) -> tuple[list[date], Matriz]:
+    """
+    Cierres mensuales que intervienen en `rentabilidades`, alineados.
+
+    El eje de precios contiene cada mes de `rentabilidades.fechas` y su mes
+    anterior (primer día de cada mes), ordenados: con meses consecutivos tiene
+    exactamente un elemento más que el de rentabilidades. Devuelve
+    (fechas_precios, matriz) con filas = fechas_precios y columnas en el orden
+    de `rentabilidades.tickers`. Todos los cierres existen: una rentabilidad
+    solo se calcula con precio en su mes y en el anterior.
+    """
+    indices = sorted(
+        {i for f in rentabilidades.fechas for i in (_indice_mes(f) - 1, _indice_mes(f))}
+    )
+    por_ticker = {
+        ticker: {
+            _indice_mes(f): p
+            for f, p in sorted(precios[ticker])
+            if np.isfinite(p) and p > 0
+        }
+        for ticker in rentabilidades.tickers
+    }
+    matriz = np.array(
+        [[por_ticker[t][i] for t in rentabilidades.tickers] for i in indices],
+        dtype=np.float64,
+    ).reshape(len(indices), len(rentabilidades.tickers))
+    return [_fecha_mes(i) for i in indices], matriz
 
 
 def separar_historicos_cortos(
@@ -202,6 +278,22 @@ def evaluar_cartera(
     return _punto(estadisticas, vector / vector.sum())
 
 
+def rentabilidades_cartera(
+    rentabilidades: RentabilidadesMensuales, pesos: dict[str, float]
+) -> Vector:
+    """
+    Rentabilidad mensual de una cartera de pesos fijos: w·r de cada mes.
+
+    Es la columna "PORTFOLIO" de la hoja; los tickers ausentes de `pesos`
+    valen 0 y los pesos se usan tal cual (sin renormalizar).
+    """
+    vector = np.array(
+        [pesos.get(t, 0.0) for t in rentabilidades.tickers], dtype=np.float64
+    )
+    serie: Vector = rentabilidades.matriz @ vector
+    return serie
+
+
 def calcular_cartera_minima_varianza(
     estadisticas: EstadisticasActivos,
 ) -> PuntoCartera:
@@ -259,6 +351,11 @@ def calcular_frontera_eficiente(
 
 def _indice_mes(fecha: date) -> int:
     return fecha.year * 12 + fecha.month
+
+
+def _fecha_mes(indice: int) -> date:
+    """Inversa de `_indice_mes`: primer día del mes."""
+    return date((indice - 1) // 12, (indice - 1) % 12 + 1, 1)
 
 
 def _validar_numero_activos(n_activos: int) -> None:

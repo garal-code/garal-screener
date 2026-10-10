@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+from dataclasses import dataclass
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -477,7 +478,7 @@ async def frontera_eficiente(
 
     try:
         # SLSQP es CPU intensivo: se ejecuta en un hilo para no bloquear el event loop
-        estadisticas, frontera, actual = await run_in_threadpool(
+        resultado = await run_in_threadpool(
             _calcular_frontera, suficientes, valor_por_ticker, puntos
         )
     except markowitz.DatosInsuficientesError as e:
@@ -485,6 +486,8 @@ async def frontera_eficiente(
             status_code=400, detail=_detalle_datos_insuficientes(str(e), excluidos)
         ) from e
 
+    estadisticas = resultado.estadisticas
+    frontera = resultado.frontera
     valor_total = sum(valor_por_ticker.values())
     valor_incluido = sum(valor_por_ticker[t] for t in estadisticas.tickers)
 
@@ -497,9 +500,10 @@ async def frontera_eficiente(
         matriz_covarianzas=estadisticas.matriz_covarianzas.tolist(),
         frontera=[_punto_cartera_out(p) for p in frontera.puntos],
         cartera_minima_varianza=_punto_cartera_out(frontera.cartera_minima_varianza),
-        cartera_actual=_punto_cartera_out(actual),
+        cartera_actual=_punto_cartera_out(resultado.actual),
         excluidos=excluidos,
         peso_excluido=(valor_total - valor_incluido) / valor_total,
+        detalle=_detalle_calculo_out(resultado, valor_por_ticker),
     )
 
 
@@ -508,27 +512,76 @@ def _es_valor_positivo(valor: float | None) -> bool:
     return valor is not None and math.isfinite(valor) and valor > 0
 
 
+@dataclass(frozen=True, eq=False)
+class _ResultadoFrontera:
+    """Todo lo calculado en el hilo, listo para mapear a esquemas."""
+
+    rentabilidades: markowitz.RentabilidadesMensuales
+    fechas_precios: list[date]
+    matriz_precios: markowitz.Matriz
+    estadisticas: markowitz.EstadisticasActivos
+    frontera: markowitz.FronteraEficiente
+    actual: markowitz.PuntoCartera
+    rentabilidades_actual: markowitz.Vector
+
+
 def _calcular_frontera(
     series: dict[str, list[tuple[date, float]]],
     valor_por_ticker: dict[str, float],
     puntos: int,
-) -> tuple[
-    markowitz.EstadisticasActivos, markowitz.FronteraEficiente, markowitz.PuntoCartera
-]:
-    """Cálculo puro (sin E/S) de estadísticas, frontera y cartera actual."""
-    estadisticas = markowitz.calcular_estadisticas_activos(series)
+) -> _ResultadoFrontera:
+    """Cálculo puro (sin E/S) de estadísticas, frontera, cartera actual y detalle."""
+    rentabilidades = markowitz.calcular_rentabilidades_mensuales(series)
+    estadisticas = markowitz.calcular_estadisticas_desde_rentabilidades(rentabilidades)
     frontera = markowitz.calcular_frontera_eficiente(estadisticas, n_puntos=puntos)
     actual = markowitz.evaluar_cartera(
         estadisticas, {t: valor_por_ticker[t] for t in estadisticas.tickers}
     )
-    return estadisticas, frontera, actual
+    fechas_precios, matriz_precios = markowitz.alinear_precios_mensuales(
+        series, rentabilidades
+    )
+    return _ResultadoFrontera(
+        rentabilidades=rentabilidades,
+        fechas_precios=fechas_precios,
+        matriz_precios=matriz_precios,
+        estadisticas=estadisticas,
+        frontera=frontera,
+        actual=actual,
+        rentabilidades_actual=markowitz.rentabilidades_cartera(
+            rentabilidades, actual.pesos
+        ),
+    )
 
 
 def _punto_cartera_out(punto: markowitz.PuntoCartera) -> schemas.PuntoCarteraOut:
     return schemas.PuntoCarteraOut(
         rentabilidad=punto.rentabilidad,
         volatilidad=punto.volatilidad,
+        varianza=punto.varianza,
         pesos=punto.pesos,
+    )
+
+
+def _detalle_calculo_out(
+    resultado: _ResultadoFrontera, valor_por_ticker: dict[str, float]
+) -> schemas.DetalleCalculoFrontera:
+    estadisticas = resultado.estadisticas
+    return schemas.DetalleCalculoFrontera(
+        datos=schemas.DatosEntradaFrontera(
+            fechas_precios=resultado.fechas_precios,
+            precios=resultado.matriz_precios.tolist(),
+            fechas=resultado.rentabilidades.fechas,
+            rentabilidades=resultado.rentabilidades.matriz.tolist(),
+        ),
+        estadisticas=schemas.EstadisticasActivosOut(
+            varianzas=estadisticas.varianzas.tolist(),
+            volatilidades=estadisticas.volatilidades.tolist(),
+            matriz_correlaciones=estadisticas.matriz_correlaciones.tolist(),
+        ),
+        cartera_actual=schemas.DetalleCarteraActual(
+            valores_eur={t: valor_por_ticker[t] for t in estadisticas.tickers},
+            rentabilidades=resultado.rentabilidades_actual.tolist(),
+        ),
     )
 
 
