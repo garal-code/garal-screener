@@ -47,6 +47,7 @@ async def resumen_cartera(
 
     posiciones_out = []
     plusvalia_realizada_cerradas = 0.0  # acumula P/L de posiciones ya cerradas
+    monedas_sin_fx: set[str] = set()  # para avisar una sola vez por moneda
 
     for instrumento in instrumentos:
         movs = (
@@ -71,22 +72,32 @@ async def resumen_cartera(
             else None
         )
 
-        # Resolver FX actual: 1.0 para EUR o moneda desconocida
+        # FX actual: 1.0 para EUR o sin moneda (se trata como EUR). Una moneda
+        # extranjera sin tipo de cambio actual queda en None: nunca se asume 1.0
         moneda = instrumento.moneda
-        # por que aqui se devuelve uno por defecto si luego ya hay un if else
-        fx = (
-            fx_rates.get(moneda.upper(), 1.0)
-            if moneda and moneda.upper() != "EUR"
-            else 1.0
-        )
+        fx = fx_rates.get(moneda.upper()) if moneda and moneda.upper() != "EUR" else 1.0
 
-        plusvalias = {}
+        plusvalias: dict = {}
         precio_actual_eur = None
-        if precio_actual is not None:
+        if precio_actual is not None and fx is not None:
             plusvalias = calculos.calcular_plusvalia_latente(
                 posicion_fifo, precio_actual, fx_actual=fx
             )
             precio_actual_eur = round(precio_actual / fx, 4)
+        elif precio_actual is not None:
+            # Sin FX el valor EUR es desconocido (como sin precio): solo se da
+            # el valor nativo, con el mismo redondeo que calcular_plusvalia_latente
+            valor_nativo = round(precio_actual * posicion_fifo["cantidad_actual"], 2)
+            plusvalias = {"valor_actual_nativo": valor_nativo}
+            if moneda and moneda.upper() not in monedas_sin_fx:
+                monedas_sin_fx.add(moneda.upper())
+                logger.warning(
+                    "Sin tipo de cambio actual EUR/%s en la cartera %s: las "
+                    "posiciones en %s quedan sin valor en EUR",
+                    moneda.upper(),
+                    cartera.id,
+                    moneda.upper(),
+                )
 
         posiciones_out.append(
             schemas.PosicionOut(
@@ -314,8 +325,10 @@ async def rentabilidad_periodo(
 
         moneda = instrumento.moneda
 
+        # Igual que en resumen_cartera: sin tipo de cambio actual el precio en
+        # EUR es desconocido (None), nunca se asume 1.0
         fx_actual = (
-            fx_actual_rates.get(moneda.upper(), 1.0)
+            fx_actual_rates.get(moneda.upper())
             if moneda and moneda.upper() != "EUR"
             else 1.0
         )
@@ -418,11 +431,9 @@ async def frontera_eficiente(
             excluidos.append(
                 schemas.ActivoExcluido(ticker=instrumento.isin, motivo="sin_ticker")
             )
-        elif not _es_valor_positivo(posicion.valor_actual_eur):
+        elif motivo := _motivo_sin_valor_eur(posicion):
             excluidos.append(
-                schemas.ActivoExcluido(
-                    ticker=instrumento.ticker, motivo="sin_precio_actual"
-                )
+                schemas.ActivoExcluido(ticker=instrumento.ticker, motivo=motivo)
             )
         else:
             valor_por_ticker[instrumento.ticker] = (
@@ -510,6 +521,21 @@ async def frontera_eficiente(
 def _es_valor_positivo(valor: float | None) -> bool:
     """Un valor EUR utilizable como peso: conocido, finito y mayor que cero."""
     return valor is not None and math.isfinite(valor) and valor > 0
+
+
+def _motivo_sin_valor_eur(
+    posicion: schemas.PosicionOut,
+) -> schemas.MotivoExclusion | None:
+    """Por qué una posición con ticker no tiene valor EUR utilizable (o None).
+
+    Sin precio nativo válido es sin_precio_actual; con él pero sin tipo de
+    cambio actual de su moneda, sin_tipo_cambio (valor EUR desconocido).
+    """
+    if posicion.fx_actual is None and _es_valor_positivo(posicion.valor_actual_nativo):
+        return "sin_tipo_cambio"
+    if not _es_valor_positivo(posicion.valor_actual_eur):
+        return "sin_precio_actual"
+    return None
 
 
 @dataclass(frozen=True, eq=False)

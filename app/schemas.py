@@ -204,27 +204,31 @@ class PuntoCarteraOut(BaseModel):
     # Cifras mensuales (sin anualizar)
     rentabilidad: float = Field(
         description=(
-            "Rentabilidad mensual esperada (w·mu). En los puntos de la frontera es "
-            "la rentabilidad objetivo para la que se minimizó la varianza."
+            "Rentabilidad mensual esperada (w·mu) con los pesos resueltos. En los "
+            "puntos de la frontera coincide, salvo tolerancia numérica, con la "
+            "rentabilidad objetivo para la que se minimizó la varianza."
         )
     )
     volatilidad: float = Field(description="Desviación típica mensual: sqrt(varianza)")
     varianza: float = Field(description="Varianza mensual de la cartera: wᵀΣw")
     pesos: dict[str, float] = Field(
-        description=(
-            "Peso de cada ticker; suman 1. En [0, 1] salvo en la referencia con "
-            "ventas en corto, donde pueden ser negativos."
-        )
+        description="Peso de cada ticker: en [0, 1] (sin ventas en corto) y suman 1."
     )
 
 
 # Por qué una posición abierta queda fuera del análisis:
 # - sin_ticker: el instrumento no tiene ticker con el que pedir precios
 # - sin_precio_actual: sin valor de mercado EUR actual conocido, finito y > 0
+# - sin_tipo_cambio: precio nativo válido pero sin tipo de cambio EUR actual para
+#   su moneda; su valor EUR es desconocido (se evalúa tras sin_precio_actual)
 # - sin_historico: el proveedor no devolvió ningún precio mensual
 # - historico_insuficiente: menos rentabilidades mensuales propias que el mínimo
 MotivoExclusion = Literal[
-    "sin_ticker", "sin_precio_actual", "sin_historico", "historico_insuficiente"
+    "sin_ticker",
+    "sin_precio_actual",
+    "sin_tipo_cambio",
+    "sin_historico",
+    "historico_insuficiente",
 ]
 
 
@@ -313,7 +317,8 @@ class FronteraEficienteCartera(BaseModel):
     # Pesos = valor de mercado EUR actual, renormalizado sobre los incluidos
     cartera_actual: PuntoCarteraOut
     excluidos: list[ActivoExcluido]
-    # Fracción [0, 1] del valor EUR de la cartera que queda fuera del análisis
-    # (posiciones sin precio actual no tienen valor conocido y no cuentan)
+    # Fracción [0, 1] del valor EUR de la cartera que queda fuera del análisis.
+    # Solo cuentan posiciones con valor EUR conocido: las excluidas por
+    # sin_ticker, sin_precio_actual o sin_tipo_cambio no tienen valor y no cuentan
     peso_excluido: float
     detalle: DetalleCalculoFrontera

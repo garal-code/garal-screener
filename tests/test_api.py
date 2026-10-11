@@ -85,7 +85,7 @@ def mock_precios(fx_rates=None, precios_historicos=None):
 
     Args:
         fx_rates: dict opcional con tipos de cambio a simular, ej. {"USD": 1.085}.
-            Por defecto {} → fx fallback 1.0 para todas las monedas (comportamiento anterior).
+            Por defecto {} → ninguna moneda tiene tipo de cambio actual.
         precios_historicos: dict opcional con precios históricos a simular para
             /rentabilidad, ej. {"AAPL": 100.0}. Por defecto {"AAPL": 100.0}.
     """
@@ -324,7 +324,7 @@ class TestResumenCartera:
 
     def test_resumen_con_precio(self, auth_client):
         cartera_id = self._setup_cartera_con_compra(auth_client)
-        with mock_precios():
+        with mock_precios(fx_rates={"USD": 1.0}):
             r = auth_client.get(f"{BASE}/carteras/{cartera_id}/resumen")
         assert r.status_code == 200
         data = r.json()
@@ -399,7 +399,8 @@ class TestRentabilidadPeriodo:
 
     def test_rentabilidad_posicion_previa_al_periodo(self, auth_client):
         cartera_id = self._setup_cartera_con_compra(auth_client)
-        with mock_precios(precios_historicos={"AAPL": 100.0}):
+        # FX actual explícito 1.0 para mantener las cifras en EUR del ejemplo
+        with mock_precios(fx_rates={"USD": 1.0}, precios_historicos={"AAPL": 100.0}):
             r = auth_client.get(
                 f"{BASE}/carteras/{cartera_id}/rentabilidad", params={"periodo": "1y"}
             )
@@ -413,6 +414,20 @@ class TestRentabilidadPeriodo:
         assert data["plusvalia_latente"] == pytest.approx(578.34, abs=0.01)
         assert data["rentabilidad_pct"] == pytest.approx(62.75, abs=0.01)
         assert data["tickers_sin_dato"] == []
+
+    def test_rentabilidad_sin_fx_actual_no_asume_1(self, auth_client):
+        # Sin tipo de cambio actual para USD el valor en EUR es desconocido:
+        # nunca se valora 1 USD = 1 EUR.
+        cartera_id = self._setup_cartera_con_compra(auth_client)
+        with mock_precios(fx_rates={}, precios_historicos={"AAPL": 100.0}):
+            r = auth_client.get(
+                f"{BASE}/carteras/{cartera_id}/rentabilidad", params={"periodo": "1y"}
+            )
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["posiciones"]) == 1
+        assert data["posiciones"][0]["valor_actual"] is None
+        assert data["valor_total"] != pytest.approx(1500.0)
 
     def test_rentabilidad_periodo_invalido(self, auth_client):
         cartera_id = auth_client.post(
@@ -471,15 +486,24 @@ class TestFronteraEficiente:
     # ticker -> (cantidad, precio actual); valor EUR: 1000, 1000, 2000
     POSICIONES = {"AAA": (10, 100.0), "BBB": (20, 50.0), "CCC": (100, 20.0)}
 
-    def _crear_cartera(self, client, posiciones: dict[str, tuple[int, float]]):
-        """Cartera con una compra en EUR por ticker (ISIN ficticio por ticker)."""
+    def _crear_cartera(
+        self,
+        client,
+        posiciones: dict[str, tuple[int, float | None]],
+        monedas: dict[str, str] | None = None,
+    ):
+        """Cartera con una compra por ticker (ISIN ficticio por ticker).
+
+        Moneda EUR salvo la indicada en `monedas` (ticker -> moneda).
+        """
+        monedas = monedas or {}
         cartera_id = client.post(f"{BASE}/carteras", json={"nombre": "Test"}).json()[
             "id"
         ]
         enriquecer = AsyncMock(
             side_effect=lambda isin: {
                 **MOCK_IA,
-                "moneda": "EUR",
+                "moneda": monedas.get(isin.removeprefix("XX"), "EUR"),
                 "ticker": isin.removeprefix("XX"),
             }
         )
@@ -499,10 +523,11 @@ class TestFronteraEficiente:
                 assert r.status_code == 200
         return cartera_id
 
-    def _mock_precios(self, posiciones, series=None, error=None):
+    def _mock_precios(self, posiciones, series=None, error=None, fx_rates=None):
         """Parchea precios actuales, FX, series mensuales y la fecha de hoy.
 
-        Devuelve (contexto, mock de obtener_precios_mensuales_batch).
+        Un precio actual None simula un ticker sin precio. Devuelve
+        (contexto, mock de obtener_precios_mensuales_batch).
         """
         mensuales = (
             AsyncMock(side_effect=error)
@@ -512,9 +537,13 @@ class TestFronteraEficiente:
         contexto = patch.multiple(
             "app.routers.posiciones.precios",
             obtener_precios_batch=AsyncMock(
-                return_value={t: precio for t, (_, precio) in posiciones.items()}
+                return_value={
+                    t: precio
+                    for t, (_, precio) in posiciones.items()
+                    if precio is not None
+                }
             ),
-            obtener_fx_batch=AsyncMock(return_value={}),
+            obtener_fx_batch=AsyncMock(return_value=fx_rates or {}),
             obtener_precios_mensuales_batch=mensuales,
             _hoy=lambda: HOY_FRONTERA,
         )
@@ -753,6 +782,52 @@ class TestFronteraEficiente:
             "BBB": pytest.approx(0.25),
             "CCC": pytest.approx(0.5),
         }
+
+    def test_sin_tipo_cambio_se_excluye_y_no_cuenta_en_peso_excluido(self, auth_client):
+        posiciones = {
+            **self.POSICIONES,
+            "USA": (10, 100.0),  # precio en USD pero sin tipo de cambio actual
+            "NOP": (10, None),  # USD sin precio: sigue siendo sin_precio_actual
+        }
+        cartera_id = self._crear_cartera(
+            auth_client, posiciones, monedas={"USA": "USD", "NOP": "USD"}
+        )
+        series = self._series_completas(self.POSICIONES)
+        contexto, mensuales = self._mock_precios(posiciones, series)
+        with contexto:
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        # Solo se pide histórico de los activos con valor EUR conocido
+        assert sorted(mensuales.call_args.args[0]) == ["AAA", "BBB", "CCC"]
+        assert sorted(data["tickers"]) == ["AAA", "BBB", "CCC"]
+        assert sorted(data["excluidos"], key=lambda e: e["ticker"]) == [
+            {"ticker": "NOP", "motivo": "sin_precio_actual"},
+            {"ticker": "USA", "motivo": "sin_tipo_cambio"},
+        ]
+        # Sin valor EUR conocido no cuentan en el peso excluido
+        assert data["peso_excluido"] == pytest.approx(0.0)
+        assert data["cartera_actual"]["pesos"] == {
+            "AAA": pytest.approx(0.25),
+            "BBB": pytest.approx(0.25),
+            "CCC": pytest.approx(0.5),
+        }
+
+    def test_con_tipo_cambio_la_posicion_en_usd_se_analiza(self, auth_client):
+        posiciones = {**self.POSICIONES, "USA": (10, 220.0)}
+        cartera_id = self._crear_cartera(
+            auth_client, posiciones, monedas={"USA": "USD"}
+        )
+        series = self._series_completas(posiciones)
+        with self._mock_precios(posiciones, series, fx_rates={"USD": 1.1})[0]:
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["excluidos"] == []
+        # 220 USD / 1.1 * 10 = 2000 EUR de 6000 EUR
+        valores_eur = data["detalle"]["cartera_actual"]["valores_eur"]
+        assert valores_eur["USA"] == pytest.approx(2000.0)
+        assert data["cartera_actual"]["pesos"]["USA"] == pytest.approx(1 / 3)
 
     def test_optimizacion_se_ejecuta_fuera_del_event_loop(self, auth_client):
         from fastapi.concurrency import run_in_threadpool
@@ -1013,6 +1088,115 @@ class TestResumenDualCurrency:
         pos = r.json()["posiciones"][0]
         # precio mock=150, fx=1.05, cantidad=10 → 150/1.05*10 ≈ 1428.57
         assert pos["valor_actual_eur"] == pytest.approx(150.0 / 1.05 * 10, abs=0.01)
+        assert pos["precio_actual_eur"] == pytest.approx(150.0 / 1.05, abs=1e-4)
+        assert pos["fx_actual"] == pytest.approx(1.05)
+
+    def test_sin_tipo_cambio_campos_eur_nulos_y_nativos_conservados(self, auth_client):
+        """Sin FX actual no se inventa 1.0: lo EUR queda nulo, como sin precio."""
+        cartera_id = self._setup_usd(auth_client)
+        with mock_precios(fx_rates={}):
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/resumen")
+        assert r.status_code == 200
+        data = r.json()
+        pos = data["posiciones"][0]
+        assert pos["moneda_nativa"] == "USD"
+        assert pos["precio_actual"] == pytest.approx(150.0)
+        assert pos["precio_actual_nativo"] == pytest.approx(150.0)
+        assert pos["valor_actual_nativo"] == pytest.approx(1500.0)
+        for campo in (
+            "fx_actual",
+            "precio_actual_eur",
+            "valor_actual",
+            "valor_actual_eur",
+            "plusvalia_latente",
+            "rentabilidad_pct",
+            "plusvalia_total",
+        ):
+            assert pos[campo] is None, campo
+        # Totales: el valor cae al coste (150 USD / 1.10 * 10), sin plusvalía latente
+        assert data["coste_total"] == pytest.approx(1363.64, abs=0.01)
+        assert data["valor_total"] == pytest.approx(data["coste_total"])
+        assert data["plusvalia_latente"] == pytest.approx(0.0)
+        assert data["num_posiciones"] == 1
+
+    def test_sin_tipo_cambio_analisis_usa_el_coste(self, auth_client):
+        cartera_id = self._setup_usd(auth_client)
+        with mock_precios(fx_rates={}):
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/analisis")
+        assert r.status_code == 200
+        assert r.json()["por_moneda"] == [
+            {"nombre": "USD", "valor": pytest.approx(1363.64), "peso_pct": 100.0}
+        ]
+
+    def test_sin_tipo_cambio_se_registra_una_vez_por_moneda(self, auth_client, caplog):
+        cartera_id = auth_client.post(
+            f"{BASE}/carteras", json={"nombre": "USD Test"}
+        ).json()["id"]
+        enriquecer = AsyncMock(
+            side_effect=lambda isin: {**MOCK_IA, "ticker": isin.removeprefix("XX")}
+        )
+        with patch("app.routers.movimientos.precios.enriquecer_por_isin", enriquecer):
+            for ticker in ("AAA", "BBB"):
+                auth_client.post(
+                    f"{BASE}/movimientos",
+                    json={
+                        "cartera_id": cartera_id,
+                        "isin": f"XX{ticker}",
+                        "tipo": "compra",
+                        "fecha": "2024-01-15",
+                        "cantidad": 1,
+                        "precio": 10.0,
+                    },
+                )
+        caplog.set_level(logging.WARNING, logger="app.routers.posiciones")
+        with patch.multiple(
+            "app.routers.posiciones.precios",
+            obtener_precios_batch=AsyncMock(return_value={"AAA": 10.0, "BBB": 20.0}),
+            obtener_fx_batch=AsyncMock(return_value={}),
+        ):
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/resumen")
+        assert r.status_code == 200
+        registros = [
+            rec for rec in caplog.records if rec.name == "app.routers.posiciones"
+        ]
+        assert len(registros) == 1
+        assert registros[0].levelno == logging.WARNING
+        assert "USD" in registros[0].getMessage()
+
+    @pytest.mark.parametrize("moneda", ["EUR", None])
+    def test_posicion_en_eur_o_sin_moneda_no_necesita_tipo_cambio(
+        self, auth_client, moneda
+    ):
+        cartera_id = auth_client.post(
+            f"{BASE}/carteras", json={"nombre": "EUR Test"}
+        ).json()["id"]
+        enriquecer = AsyncMock(
+            return_value={**MOCK_IA, "moneda": moneda, "ticker": "SAN"}
+        )
+        with patch("app.routers.movimientos.precios.enriquecer_por_isin", enriquecer):
+            auth_client.post(
+                f"{BASE}/movimientos",
+                json={
+                    "cartera_id": cartera_id,
+                    "isin": "ES0113900J37",
+                    "tipo": "compra",
+                    "fecha": "2024-01-15",
+                    "cantidad": 10,
+                    "precio": 4.0,
+                },
+            )
+        with patch.multiple(
+            "app.routers.posiciones.precios",
+            obtener_precios_batch=AsyncMock(return_value={"SAN": 5.0}),
+            obtener_fx_batch=AsyncMock(return_value={}),
+        ):
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/resumen")
+        assert r.status_code == 200
+        pos = r.json()["posiciones"][0]
+        assert pos["fx_actual"] == pytest.approx(1.0)
+        assert pos["valor_actual_eur"] == pytest.approx(50.0)
+        assert pos["valor_actual_nativo"] == pytest.approx(50.0)
+        assert pos["plusvalia_latente"] == pytest.approx(10.0)
 
 
 # ── Ownership authorization (Phase 3/4, PR3) ───────────────────────────────────

@@ -71,19 +71,19 @@ Cuando la solución cerrada de la hoja ya tiene todos los pesos positivos, ambas
 GET /api/v1/carteras/{cartera_id}/frontera-eficiente?anios=5&puntos=20
 ```
 
-- Ruta: `app/routers/posiciones.py:387-391` (router con prefijo `/carteras`, `app/routers/posiciones.py:18`, montado bajo `/api/v1` en `main.py:55`).
-- Modelo de respuesta: `schemas.FronteraEficienteCartera` (`app/schemas.py:300-319`).
+- Ruta: `app/routers/posiciones.py:402-406` (router con prefijo `/carteras`, `app/routers/posiciones.py:18`, montado bajo `/api/v1` en `main.py:55`).
+- Modelo de respuesta: `schemas.FronteraEficienteCartera` (`app/schemas.py:304-324`).
 
 | Parámetro | Tipo | Defecto | Rango | Significado | Fuente |
 |---|---|---|---|---|---|
-| `anios` | entero | `5` | `1` a `20` | Años de histórico mensual | `app/routers/posiciones.py:392` |
-| `puntos` | entero | `20` (`markowitz.N_PUNTOS_FRONTERA`) | `2` a `100` | Rentabilidades objetivo de la frontera | `app/routers/posiciones.py:393-395`, `app/services/markowitz.py:30` |
+| `anios` | entero | `5` | `1` a `20` | Años de histórico mensual | `app/routers/posiciones.py:407` |
+| `puntos` | entero | `20` (`markowitz.N_PUNTOS_FRONTERA`) | `2` a `100` | Rentabilidades objetivo de la frontera | `app/routers/posiciones.py:408-410`, `app/services/markowitz.py:30` |
 
 Validación y acceso:
 
-- Un valor fuera de rango lo rechaza FastAPI con **422** (`tests/test_api.py:771-781`).
-- La cartera se resuelve con la dependencia `get_owned_cartera` (`app/auth/security.py:114-135`): si no existe **o pertenece a otro usuario** se devuelve **404** `"Cartera no encontrada"`, nunca 403, para no confirmar la existencia de carteras ajenas (`tests/test_api.py:783-793`). En el caso de cartera ajena no se llega a consultar el proveedor de precios.
-- Sin autenticación: **401** (`tests/test_api.py:1052`).
+- Un valor fuera de rango lo rechaza FastAPI con **422** (`tests/test_api.py:831-841`).
+- La cartera se resuelve con la dependencia `get_owned_cartera` (`app/auth/security.py:114-135`): si no existe **o pertenece a otro usuario** se devuelve **404** `"Cartera no encontrada"`, nunca 403, para no confirmar la existencia de carteras ajenas (`tests/test_api.py:843-853`). En el caso de cartera ajena no se llega a consultar el proveedor de precios.
+- Sin autenticación: **401** (`tests/test_api.py:1221`).
 
 ---
 
@@ -91,9 +91,9 @@ Validación y acceso:
 
 ### 3.1. Posiciones abiertas valoradas en EUR
 
-El endpoint reutiliza `resumen_cartera` (`app/routers/posiciones.py:411`), que:
+El endpoint reutiliza `resumen_cartera` (`app/routers/posiciones.py:426`), que:
 
-1. Reconstruye cada posición con FIFO (`calculos.calcular_posicion_fifo`) y **descarta las posiciones cerradas** (`cantidad_actual <= 0`, `app/routers/posiciones.py:63-66`).
+1. Reconstruye cada posición con FIFO (`calculos.calcular_posicion_fifo`) y **descarta las posiciones cerradas** (`cantidad_actual <= 0`, `app/routers/posiciones.py:64-67`).
 2. Obtiene el precio actual de cada ticker y el tipo de cambio actual en paralelo (`app/routers/posiciones.py:39-46`).
 3. Calcula el valor de mercado en EUR (`app/services/calculos.py:194-196`):
 
@@ -101,29 +101,30 @@ $$
 V = \operatorname{round}\left(\frac{P^{\text{actual}}_{\text{nativo}}}{\text{fx}} \cdot \text{cantidad},\ 2\right)
 $$
 
-donde $V$ es `valor_actual_eur`, $P^{\text{actual}}_{\text{nativo}}$ el precio actual en moneda nativa y `fx` sigue el convenio de Yahoo Finance `EUR{MONEDA}=X` (unidades de la moneda por 1 EUR) y vale `1.0` para EUR. Si el tipo de cambio de una moneda no está disponible, `resumen_cartera` usa también `1.0` (`app/routers/posiciones.py:77-81`; ver la sección 17).
+donde $V$ es `valor_actual_eur`, $P^{\text{actual}}_{\text{nativo}}$ el precio actual en moneda nativa y `fx` sigue el convenio de Yahoo Finance `EUR{MONEDA}=X` (unidades de la moneda por 1 EUR) y vale `1.0` para EUR y para instrumentos sin moneda, que se tratan como EUR (`app/routers/posiciones.py:75-82`). Si una moneda extranjera no tiene tipo de cambio actual, **no se asume `1.0`**: la posición se trata como si no tuviera precio en EUR. Conserva `precio_actual_nativo` y `valor_actual_nativo` (mismo redondeo a 2 decimales), pero `valor_actual_eur`, `precio_actual_eur`, la plusvalía latente, la rentabilidad y `fx_actual` quedan a `null`. Además se registra un `logger.warning` por moneda y petición (`app/routers/posiciones.py:91-104`). Esa posición se excluye con `sin_tipo_cambio` (sección 3.2).
 
 ### 3.2. Motivos de exclusión y orden de evaluación
 
-Cada posición abierta se evalúa en este orden; la primera condición que se cumple determina el motivo (`app/routers/posiciones.py:413-431` y `468-477`). Los motivos están tipados en `MotivoExclusion` (`app/schemas.py:221-228`).
+Cada posición abierta se evalúa en este orden; la primera condición que se cumple determina el motivo (`app/routers/posiciones.py:428-444`, `_motivo_sin_valor_eur` en `528-540` y `481-490`). Los motivos están tipados en `MotivoExclusion` (`app/schemas.py:219-232`).
 
 | Orden | Motivo | Condición | Momento |
 |---|---|---|---|
-| 1 | `sin_ticker` | El instrumento no tiene ticker. En `ActivoExcluido.ticker` se informa el **ISIN** (`app/schemas.py:232`). | Antes de pedir precios |
-| 2 | `sin_precio_actual` | `valor_actual_eur` es `None`, no finito (NaN, ±inf) o $\le 0$ (`_es_valor_positivo`, `app/routers/posiciones.py:510-512`). | Antes de pedir precios |
-| 3 | `historico_insuficiente` | El proveedor devolvió precios, pero el activo tiene menos de 12 rentabilidades mensuales propias (`separar_historicos_cortos`, sección 5.3). | Tras descargar precios |
-| 4 | `sin_historico` | El proveedor no devolvió ningún cierre mensual utilizable para ese ticker. | Tras descargar precios |
+| 1 | `sin_ticker` | El instrumento no tiene ticker. En `ActivoExcluido.ticker` se informa el **ISIN** (`app/schemas.py:236`). | Antes de pedir precios |
+| 2 | `sin_precio_actual` | No hay precio actual nativo válido: `valor_actual_nativo` es `None`, no finito (NaN, ±inf) o $\le 0$. También cuando, con tipo de cambio, `valor_actual_eur` no es finito o es $\le 0$ (`_es_valor_positivo`, `app/routers/posiciones.py:523-525`). | Antes de pedir precios |
+| 3 | `sin_tipo_cambio` | Hay precio nativo válido, pero no hay tipo de cambio actual para su moneda (`fx_actual` es `null`): el valor EUR es desconocido (sección 3.1). | Antes de pedir precios |
+| 4 | `historico_insuficiente` | El proveedor devolvió precios, pero el activo tiene menos de 12 rentabilidades mensuales propias (`separar_historicos_cortos`, sección 5.3). | Tras descargar precios |
+| 5 | `sin_historico` | El proveedor no devolvió ningún cierre mensual utilizable para ese ticker. | Tras descargar precios |
 
-Si dos posiciones comparten ticker, sus valores EUR **se suman** en `valor_por_ticker` (`app/routers/posiciones.py:428-431`) y se tratan como un único activo.
+Si dos posiciones comparten ticker, sus valores EUR **se suman** en `valor_por_ticker` (`app/routers/posiciones.py:441-444`) y se tratan como un único activo.
 
 ### 3.3. Mínimo de activos
 
-- Si tras los motivos 1 y 2 quedan **menos de 2 tickers valorados**, se devuelve **400** sin consultar el histórico (`app/routers/posiciones.py:433-442`, `tests/test_api.py:675-684`).
-- Si tras los motivos 3 y 4 quedan menos de 2 activos con histórico suficiente, el cálculo lanza `DatosInsuficientesError` y se devuelve **400** (`app/services/markowitz.py:361-366`, `tests/test_api.py:686-695`).
+- Si tras los motivos 1 a 3 quedan **menos de 2 tickers valorados**, se devuelve **400** sin consultar el histórico (`app/routers/posiciones.py:446-455`, `tests/test_api.py:689-698`).
+- Si tras los motivos 4 y 5 quedan menos de 2 activos con histórico suficiente, el cálculo lanza `DatosInsuficientesError` y se devuelve **400** (`app/services/markowitz.py:361-366`, `tests/test_api.py:700-709`).
 
 ### 3.4. `peso_excluido`
 
-Fracción del valor EUR de la cartera que queda fuera del análisis (`app/routers/posiciones.py:491-492` y `505`):
+Fracción del valor EUR de la cartera que queda fuera del análisis (`app/routers/posiciones.py:504-505` y `518`):
 
 $$
 \text{peso excluido} = \frac{V_{\text{total}} - V_{\text{incluido}}}{V_{\text{total}}},
@@ -133,8 +134,8 @@ V_{\text{total}} = \sum_{k \in \text{valorados}} V_k,
 V_{\text{incluido}} = \sum_{k \in \text{tickers}} V_k
 $$
 
-- $V_{\text{total}}$ solo suma los tickers que superaron los motivos 1 y 2: una posición `sin_ticker` o `sin_precio_actual` **no tiene valor conocido y no cuenta** (comentario en `app/schemas.py:316-317`; test `tests/test_api.py:736-755`).
-- Los excluidos por `historico_insuficiente` o `sin_historico` sí cuentan en el numerador. Ejemplo del test `tests/test_api.py:646-673`: 2000 EUR excluidos sobre 6000 EUR $\Rightarrow$ `peso_excluido` $= 1/3$.
+- $V_{\text{total}}$ solo suma los tickers que superaron los motivos 1 a 3. Una posición `sin_ticker`, `sin_precio_actual` o `sin_tipo_cambio` **no tiene valor EUR conocido y no cuenta** (comentario en `app/schemas.py:320-322`; tests `tests/test_api.py:750-769` y `771-799`).
+- Los excluidos por `historico_insuficiente` o `sin_historico` sí cuentan en el numerador. Ejemplo del test `tests/test_api.py:660-687`: 2000 EUR excluidos sobre 6000 EUR $\Rightarrow$ `peso_excluido` $= 1/3$.
 
 ---
 
@@ -147,7 +148,7 @@ fecha_fin = precios.fin_ultimo_mes_completo()
 fecha_inicio = date(fecha_fin.year - anios, fecha_fin.month, 1)
 ```
 
-(`app/routers/posiciones.py:444-446`)
+(`app/routers/posiciones.py:457-459`)
 
 - `fin_ultimo_mes_completo` devuelve el **último día del último mes cerrado**: `hoy.replace(day=1) - 1 día` (`app/services/precios.py:299-304`). El mes en curso **nunca** cuenta, ni siquiera el día 1. Ejemplos de `tests/test_precios.py:545-557`:
 
@@ -157,7 +158,7 @@ fecha_inicio = date(fecha_fin.year - anios, fecha_fin.month, 1)
 | 2026-03-01 | 2026-02-28 |
 | 2026-01-15 | 2025-12-31 |
 
-- `fecha_inicio` es el día 1 del **mismo mes** de `fecha_fin`, `anios` años antes. Con meses completos esto da $12 \cdot \text{anios} + 1$ cierres y, por tanto, como máximo $12 \cdot \text{anios}$ rentabilidades. Ejemplo (`tests/test_api.py:538-547`): hoy = 2026-10-04, `anios=5` $\Rightarrow$ ventana `[2021-09-01, 2026-09-30]`, 61 cierres, 60 observaciones.
+- `fecha_inicio` es el día 1 del **mismo mes** de `fecha_fin`, `anios` años antes. Con meses completos esto da $12 \cdot \text{anios} + 1$ cierres y, por tanto, como máximo $12 \cdot \text{anios}$ rentabilidades. Ejemplo (`tests/test_api.py:552-561`): hoy = 2026-10-04, `anios=5` $\Rightarrow$ ventana `[2021-09-01, 2026-09-30]`, 61 cierres, 60 observaciones.
 
 ### 4.2. Descarga
 
@@ -243,7 +244,7 @@ El orden de `tickers` es el orden de inserción del diccionario de series, que s
 
 ### 5.3. Exclusión previa de históricos cortos
 
-Antes de alinear, el endpoint llama a `separar_historicos_cortos` (`app/services/markowitz.py:224-246`, `app/routers/posiciones.py:466-468`). Para cada serie cuenta sus **rentabilidades propias** (calculadas con la regla de 5.1, es decir, solo meses consecutivos) y:
+Antes de alinear, el endpoint llama a `separar_historicos_cortos` (`app/services/markowitz.py:224-246`, `app/routers/posiciones.py:479-481`). Para cada serie cuenta sus **rentabilidades propias** (calculadas con la regla de 5.1, es decir, solo meses consecutivos) y:
 
 - con al menos `MIN_OBSERVACIONES = 12` (`app/services/markowitz.py:29`) $\Rightarrow$ la serie pasa al cálculo;
 - con menos $\Rightarrow$ el ticker se marca `historico_insuficiente`.
@@ -257,7 +258,7 @@ Aunque cada activo tenga 12 rentabilidades propias, tras la intersección puede 
 - al menos 2 activos, y
 - $n \ge 12$ meses comunes.
 
-Si no, lanza `DatosInsuficientesError` $\Rightarrow$ **400** (`tests/test_api.py:697-708`). Con menos observaciones que activos la covarianza es directamente singular, y con menos de 12 se considera poco fiable (comentario en `app/services/markowitz.py:27-28`).
+Si no, lanza `DatosInsuficientesError` $\Rightarrow$ **400** (`tests/test_api.py:711-722`). Con menos observaciones que activos la covarianza es directamente singular, y con menos de 12 se considera poco fiable (comentario en `app/services/markowitz.py:27-28`).
 
 ---
 
@@ -351,15 +352,16 @@ $$
 
 ## 8. Cartera actual
 
-En `_calcular_frontera` (`app/routers/posiciones.py:537-539`) la cartera actual se evalúa con `evaluar_cartera` (`app/services/markowitz.py:261-278`), pasando como "pesos" los **valores EUR** de los tickers analizados:
+En `_calcular_frontera` (`app/routers/posiciones.py:565-567`) la cartera actual se evalúa con `evaluar_cartera` (`app/services/markowitz.py:261-278`), pasando como "pesos" los **valores EUR** de los tickers analizados:
 
 $$
 w_i^{\text{actual}} = \frac{V_i}{\sum_{j \in \text{tickers}} V_j}
 $$
 
-- La suma del denominador es solo sobre los activos **incluidos** en el análisis: los pesos se **renormalizan** a 1 sobre ellos (`tests/test_api.py:646-673`).
+- La suma del denominador es solo sobre los activos **incluidos** en el análisis: los pesos se **renormalizan** a 1 sobre ellos (`tests/test_api.py:660-687`).
+- $V_i$ siempre es un valor EUR real: una posición sin tipo de cambio actual queda fuera (`sin_tipo_cambio`, sección 3.2) en lugar de entrar con su valor nativo tomado como EUR. Con tipo de cambio, $V_i = P^{\text{actual}}_{\text{nativo}} / \text{fx} \cdot \text{cantidad}$ (`tests/test_api.py:801-815`).
 - `evaluar_cartera` rechaza pesos negativos o una suma $\le 0$ con `ValueError` (no puede ocurrir en el endpoint, porque todos los valores incluidos son $> 0$).
-- La serie mensual `detalle.cartera_actual.rentabilidades` es $R\,w^{\text{actual}}$ con los pesos ya normalizados (`app/routers/posiciones.py:550-552`).
+- La serie mensual `detalle.cartera_actual.rentabilidades` es $R\,w^{\text{actual}}$ con los pesos ya normalizados (`app/routers/posiciones.py:578-580`).
 
 **Monedas.** Los pesos se calculan con valores en **EUR**, pero las rentabilidades $r_{i,t}$ se calculan con precios en la **moneda nativa** de cada activo. Es decir, $\mu$ y $\Sigma$ no incluyen el efecto del tipo de cambio para un inversor en EUR (sección 15).
 
@@ -472,7 +474,7 @@ Este punto cumple exactamente las dos igualdades ($\mathbf{1}^{\top}w^{(0)} = 1$
 
 ### 10.3. Puntos no resueltos
 
-Si `_minimizar_varianza` devuelve `None` para un objetivo (no converge o incumple una restricción, sección 9.3), **ese punto se omite** sin error (`app/services/markowitz.py:344-345`). Por eso la API puede devolver **menos** puntos que `puntos` (`tests/test_api.py:558`).
+Si `_minimizar_varianza` devuelve `None` para un objetivo (no converge o incumple una restricción, sección 9.3), **ese punto se omite** sin error (`app/services/markowitz.py:344-345`). Por eso la API puede devolver **menos** puntos que `puntos` (`tests/test_api.py:572`).
 
 ### 10.4. Propiedades comprobadas en tests
 
@@ -540,9 +542,9 @@ Como en esta hoja todos los pesos de $w_{\min}$ son positivos, la solución long
 
 ## 12. Respuesta de la API
 
-Construida en `app/routers/posiciones.py:494-507` y `_detalle_calculo_out` (`app/routers/posiciones.py:565-585`). Todas las cifras son mensuales, como fracción (0.01 = 1 %), sin redondear. Notación: $N$ = `len(tickers)`, $n$ = `n_observaciones`.
+Construida en `app/routers/posiciones.py:507-520` y `_detalle_calculo_out` (`app/routers/posiciones.py:593-613`). Todas las cifras son mensuales, como fracción (0.01 = 1 %), sin redondear. Notación: $N$ = `len(tickers)`, $n$ = `n_observaciones`.
 
-### 12.1. `FronteraEficienteCartera` (`app/schemas.py:300-319`)
+### 12.1. `FronteraEficienteCartera` (`app/schemas.py:304-324`)
 
 | Campo | Tipo / dimensión | Significado |
 |---|---|---|
@@ -560,7 +562,7 @@ Construida en `app/routers/posiciones.py:494-507` y `_detalle_calculo_out` (`app
 | `peso_excluido` | número en $[0, 1]$ | Sección 3.4 |
 | `detalle` | `DetalleCalculoFrontera` | Datos intermedios para reproducir el cálculo |
 
-### 12.2. `PuntoCarteraOut` (`app/schemas.py:203-218`)
+### 12.2. `PuntoCarteraOut` (`app/schemas.py:203-216`)
 
 | Campo | Significado |
 |---|---|
@@ -569,9 +571,9 @@ Construida en `app/routers/posiciones.py:494-507` y `_detalle_calculo_out` (`app
 | `varianza` | `volatilidad²` |
 | `pesos` | `{ticker: peso}` para **todos** los `tickers` (incluidos los de peso 0); suman 1 y están en $[0, 1]$ |
 
-### 12.3. `detalle` (`DetalleCalculoFrontera`, `app/schemas.py:292-297`)
+### 12.3. `detalle` (`DetalleCalculoFrontera`, `app/schemas.py:296-301`)
 
-**`detalle.datos`** (`DatosEntradaFrontera`, `app/schemas.py:237-260`), construido por `alinear_precios_mensuales` (`app/services/markowitz.py:192-221`):
+**`detalle.datos`** (`DatosEntradaFrontera`, `app/schemas.py:241-264`), construido por `alinear_precios_mensuales` (`app/services/markowitz.py:192-221`):
 
 | Campo | Dimensión | Significado |
 |---|---|---|
@@ -580,9 +582,9 @@ Construida en `app/routers/posiciones.py:494-507` y `_detalle_calculo_out` (`app
 | `fechas` | $n$ | Mes (día 1) de cada rentabilidad |
 | `rentabilidades` | $n \times N$ | $R$; filas = `fechas`, columnas = `tickers` |
 
-Con meses consecutivos, $m = n + 1$, `fechas_precios[0] = fecha_inicio`, `fechas_precios[1:] == fechas` y `rentabilidades == precios[1:] / precios[:-1] - 1` (`tests/test_api.py:587-605`). Con huecos, $m > n + 1$ y esa igualdad fila a fila deja de cumplirse; cada rentabilidad sale de su mes y del mes anterior (`tests/test_markowitz.py:337-360`).
+Con meses consecutivos, $m = n + 1$, `fechas_precios[0] = fecha_inicio`, `fechas_precios[1:] == fechas` y `rentabilidades == precios[1:] / precios[:-1] - 1` (`tests/test_api.py:601-619`). Con huecos, $m > n + 1$ y esa igualdad fila a fila deja de cumplirse; cada rentabilidad sale de su mes y del mes anterior (`tests/test_markowitz.py:337-360`).
 
-**`detalle.estadisticas`** (`EstadisticasActivosOut`, `app/schemas.py:263-274`):
+**`detalle.estadisticas`** (`EstadisticasActivosOut`, `app/schemas.py:267-278`):
 
 | Campo | Dimensión | Significado |
 |---|---|---|
@@ -590,7 +592,7 @@ Con meses consecutivos, $m = n + 1$, `fechas_precios[0] = fecha_inicio`, `fechas
 | `volatilidades` | $N$ | $\sigma_i$ |
 | `matriz_correlaciones` | $N \times N$ | $\rho_{ij}$ (sección 6.3) |
 
-**`detalle.cartera_actual`** (`DetalleCarteraActual`, `app/schemas.py:277-289`):
+**`detalle.cartera_actual`** (`DetalleCarteraActual`, `app/schemas.py:281-293`):
 
 | Campo | Dimensión | Significado |
 |---|---|---|
@@ -603,18 +605,18 @@ Con meses consecutivos, $m = n + 1$, `fechas_precios[0] = fecha_inicio`, `fechas
 
 | Código | Causa | Origen |
 |---|---|---|
-| **400** | Menos de 2 posiciones abiertas con ticker y valor EUR válido (no se consulta el histórico) | `app/routers/posiciones.py:433-442` |
+| **400** | Menos de 2 posiciones abiertas con ticker y valor EUR válido (no se consulta el histórico) | `app/routers/posiciones.py:446-455` |
 | **400** | Menos de 2 activos con histórico suficiente | `app/services/markowitz.py:361-366` |
 | **400** | Menos de 12 meses comunes a todos los activos | `app/services/markowitz.py:176-181` |
 | **400** | Estadísticas no finitas | `app/services/markowitz.py:373-376` |
 | **400** | Covarianza singular (activo sin variación o activos linealmente dependientes) | `app/services/markowitz.py:377-382` |
 | **400** | SLSQP no resuelve la cartera de mínima varianza | `app/services/markowitz.py:390-393` |
-| **401** | Petición sin autenticar | `tests/test_api.py:1052` |
+| **401** | Petición sin autenticar | `tests/test_api.py:1221` |
 | **404** | Cartera inexistente o de otro usuario | `app/auth/security.py:124-134` |
-| **422** | `anios` o `puntos` fuera de rango (validación de FastAPI) | `app/routers/posiciones.py:392-395` |
-| **503** | `ProveedorPreciosError` (sección 4.4) | `app/routers/posiciones.py:451-464` |
+| **422** | `anios` o `puntos` fuera de rango (validación de FastAPI) | `app/routers/posiciones.py:407-410` |
+| **503** | `ProveedorPreciosError` (sección 4.4) | `app/routers/posiciones.py:464-477` |
 
-Formato del `detail` de los 400 (`_detalle_datos_insuficientes`, `app/routers/posiciones.py:588-597`):
+Formato del `detail` de los 400 (`_detalle_datos_insuficientes`, `app/routers/posiciones.py:616-625`):
 
 ```text
 No hay datos suficientes para calcular la frontera eficiente. <motivo> Excluidos: <ticker> (<motivo>), <ticker> (<motivo>).
@@ -622,9 +624,9 @@ No hay datos suficientes para calcular la frontera eficiente. <motivo> Excluidos
 
 La parte `Excluidos: ...` solo aparece si hay excluidos en ese momento.
 
-En el 503, el `detail` es un mensaje genérico (`"No se pudieron obtener los precios históricos del proveedor de precios. Inténtalo de nuevo más tarde."`) que no filtra el error interno; el error original se registra con `logger.warning` junto con el id de la cartera (`app/routers/posiciones.py:452-457`, `tests/test_api.py:718-734`).
+En el 503, el `detail` es un mensaje genérico (`"No se pudieron obtener los precios históricos del proveedor de precios. Inténtalo de nuevo más tarde."`) que no filtra el error interno; el error original se registra con `logger.warning` junto con el id de la cartera (`app/routers/posiciones.py:465-470`, `tests/test_api.py:732-748`).
 
-El cálculo (SLSQP) se ejecuta con `run_in_threadpool` para no bloquear el event loop (`app/routers/posiciones.py:479-483`, `tests/test_api.py:757-769`).
+El cálculo (SLSQP) se ejecuta con `run_in_threadpool` para no bloquear el event loop (`app/routers/posiciones.py:492-496`, `tests/test_api.py:817-829`).
 
 ---
 
@@ -763,11 +765,11 @@ Distancias $\lvert \sigma_k - \sigma_{\text{actual}} \rvert$: $0{,}001163$; $0{,
 
 ## 17. Notas de mantenimiento
 
-Discrepancias e incidencias detectadas al redactar este documento. No se ha modificado código.
+Discrepancias e incidencias detectadas al redactar este documento. Las resueltas indican qué cambió.
 
-1. **Descripción obsoleta de ventas en corto.** `app/schemas.py:215-216` (`PuntoCarteraOut.pesos`) dice *"En [0, 1] salvo en la referencia con ventas en corto, donde pueden ser negativos"*. Esa referencia ya no existe en la API; hoy los pesos siempre están en $[0, 1]$. Conviene eliminar la segunda frase.
-2. **`rentabilidad` de los puntos de la frontera.** `app/schemas.py:207-208` la describe como *"la rentabilidad objetivo para la que se minimizó la varianza"*. En realidad es $w^{\top}\mu$ recalculado con los pesos limpiados y renormalizados (`app/services/markowitz.py:444-446` y `449-457`), que coincide con el objetivo solo dentro de la tolerancia de $10^{-7}$.
-3. **Tipo de cambio por defecto 1.0.** Si no hay FX para una moneda, `resumen_cartera` usa `fx = 1.0` (`app/routers/posiciones.py:77-81`; el propio código lo cuestiona en el comentario de la línea 76). El valor nativo se toma entonces como EUR y distorsiona los pesos de `cartera_actual` y `peso_excluido`, sin que aparezca en `excluidos`.
-4. **Fallo parcial del proveedor.** Si yfinance devuelve datos de algunos tickers pero falla en otros, los que fallan se omiten del resultado (`app/services/precios.py:373-375` y `383-384`) y el endpoint los clasifica como `sin_historico` (`app/routers/posiciones.py:474-477`), no como 503. Solo un fallo total se considera error del proveedor.
-5. **Docstring de los tests.** `tests/test_markowitz.py:4-6` menciona la solución cerrada "con ventas en corto permitidas": es correcto, porque se usa solo como oráculo; no indica que exista en la API.
-6. **Comentario de `peso_excluido`.** `app/schemas.py:316-317` dice que las posiciones *sin precio actual* no cuentan; tampoco cuentan las `sin_ticker` (no tienen precio porque no tienen ticker). El comportamiento es coherente, pero el comentario no lo menciona.
+1. **Descripción obsoleta de ventas en corto. Resuelta.** `PuntoCarteraOut.pesos` mencionaba una referencia con ventas en corto que ya no existe en la API. Ahora dice que los pesos están en $[0, 1]$ y suman 1 (`app/schemas.py:214-216`).
+2. **`rentabilidad` de los puntos de la frontera. Resuelta.** La descripción decía que era la rentabilidad objetivo. Ahora indica que es $w^{\top}\mu$ con los pesos resueltos, que coincide con el objetivo salvo tolerancia numérica (`app/schemas.py:205-211`; cálculo en `app/services/markowitz.py:444-446` y `449-457`).
+3. **Tipo de cambio por defecto 1.0. Resuelta.** `resumen_cartera` ya no usa `fx = 1.0` cuando falta el tipo de cambio de una moneda extranjera. Los campos EUR de la posición quedan a `null` y los nativos se conservan; los totales y `/analisis` usan el coste. Se registra un aviso por moneda (`app/routers/posiciones.py:75-104`). En la frontera, la posición se excluye con `sin_tipo_cambio` y no cuenta en `peso_excluido` (secciones 3.1, 3.2 y 3.4).
+4. **Fallo parcial del proveedor.** Si yfinance devuelve datos de algunos tickers pero falla en otros, los que fallan se omiten del resultado (`app/services/precios.py:373-375` y `383-384`). El endpoint los clasifica como `sin_historico` (`app/routers/posiciones.py:487-490`), no como 503: solo un fallo total se considera error del proveedor.
+5. **Docstring de los tests.** `tests/test_markowitz.py:4-6` menciona la solución cerrada "con ventas en corto permitidas". Es correcto, porque se usa solo como oráculo; no indica que exista en la API.
+6. **Comentario de `peso_excluido`. Resuelta.** El comentario ahora indica que solo cuentan las posiciones con valor EUR conocido: las excluidas por `sin_ticker`, `sin_precio_actual` o `sin_tipo_cambio` no cuentan (`app/schemas.py:320-322`).
