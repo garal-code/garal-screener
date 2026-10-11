@@ -427,7 +427,11 @@ class TestRentabilidadPeriodo:
         data = r.json()
         assert len(data["posiciones"]) == 1
         assert data["posiciones"][0]["valor_actual"] is None
-        assert data["valor_total"] != pytest.approx(1500.0)
+        # Sin valor en EUR, el total cae al coste (921.66 = 10 × 100 USD / 1.085),
+        # como con un precio actual ausente: sin plusvalía latente inventada.
+        assert data["valor_total"] == pytest.approx(921.66, abs=0.01)
+        assert data["plusvalia_latente"] == pytest.approx(0.0)
+        assert data["rentabilidad_pct"] == pytest.approx(0.0)
 
     def test_rentabilidad_periodo_invalido(self, auth_client):
         cartera_id = auth_client.post(
