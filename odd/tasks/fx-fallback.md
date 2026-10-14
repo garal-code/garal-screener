@@ -26,7 +26,7 @@ calculation (`docs/markowitz.md` section 17, note 3).
   frontier exclusion `sin_tipo_cambio` (evaluated after `sin_precio_actual`); schema Literal + comments; remove the
   stale question comment; update `docs/markowitz.md` (exclusion reasons, note 3 resolved); tests for summary and
   frontier.
-- [ ] T2 — Frontend: `MotivoExclusion` + label "sin tipo de cambio"; verify dashboard/positions table render a
+- [x] T2 — Frontend: `MotivoExclusion` + label "sin tipo de cambio"; verify dashboard/positions table render a
   position with native price but null EUR values without NaN or misleading figures; tests.
 
 ## Checks
@@ -50,3 +50,8 @@ calculation (`docs/markowitz.md` section 17, note 3).
   value. RED: new `test_rentabilidad_sin_fx_actual_no_asume_1` failed (`1500.0 is None`);
   `test_rentabilidad_posicion_previa_al_periodo` now passes an explicit `{"USD": 1.0}`. black is not in `.venv`;
   run via `uvx black` (formatting applied). GREEN: ruff, black --check, mypy clean; pytest 221 passed.
+- 2026-10-14 T2 (`investment-portfolio-ui` `fix/sin-tipo-cambio`, e58dbb2): `MotivoExclusion` + label
+  "sin tipo de cambio"; `Posicion` EUR fields nullable; `PositionViewModel.precioActualEur` is undefined when
+  unknown (no price, or foreign without FX; never the native price or 0) and new `sinTipoCambio`; the position
+  row shows "—" for an unknown EUR price and "<native> · sin tipo de cambio" in the detail. RED: 6 tests failed
+  (view model + row + dashboard). GREEN: `npx vitest run` 263 passed; `npx tsc --noEmit` clean.
