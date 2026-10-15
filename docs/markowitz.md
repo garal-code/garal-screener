@@ -68,7 +68,7 @@ Cuando la solución cerrada de la hoja ya tiene todos los pesos positivos, ambas
 ## 2. Endpoint y parámetros
 
 ```text
-GET /api/v1/carteras/{cartera_id}/frontera-eficiente?anios=5&puntos=20
+GET /api/v1/carteras/{cartera_id}/markowitz?anios=5&puntos=20
 ```
 
 - Ruta: `app/routers/posiciones.py:402-406` (router con prefijo `/carteras`, `app/routers/posiciones.py:18`, montado bajo `/api/v1` en `main.py:55`).

@@ -398,7 +398,7 @@ async def rentabilidad_periodo(
 
 
 @router.get(
-    "/{cartera_id}/frontera-eficiente",
+    "/{cartera_id}/markowitz",
     response_model=schemas.FronteraEficienteCartera,
 )
 async def frontera_eficiente(

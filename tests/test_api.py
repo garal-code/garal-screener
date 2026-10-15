@@ -562,7 +562,7 @@ class TestFronteraEficiente:
         contexto, mensuales = self._mock_precios(self.POSICIONES, series)
         with contexto:
             r = auth_client.get(
-                f"{BASE}/carteras/{cartera_id}/frontera-eficiente",
+                f"{BASE}/carteras/{cartera_id}/markowitz",
                 params={"anios": 5, "puntos": 10},
             )
         assert r.status_code == 200, r.text
@@ -608,7 +608,7 @@ class TestFronteraEficiente:
         series = self._series_completas(self.POSICIONES)
         with self._mock_precios(self.POSICIONES, series)[0]:
             r = auth_client.get(
-                f"{BASE}/carteras/{cartera_id}/frontera-eficiente",
+                f"{BASE}/carteras/{cartera_id}/markowitz",
                 params={"anios": 5, "puntos": 10},
             )
         assert r.status_code == 200, r.text
@@ -688,7 +688,7 @@ class TestFronteraEficiente:
             "NEW": _serie_mensual(6, semilla=99),
         }
         with self._mock_precios(posiciones, series)[0]:
-            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/markowitz")
         assert r.status_code == 200, r.text
         data = r.json()
         assert sorted(data["tickers"]) == ["AAA", "BBB", "CCC"]
@@ -710,7 +710,7 @@ class TestFronteraEficiente:
         cartera_id = self._crear_cartera(auth_client, posiciones)
         contexto, mensuales = self._mock_precios(posiciones)
         with contexto:
-            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/markowitz")
         assert r.status_code == 400
         assert "al menos 2" in r.json()["detail"]
         # Sin activos suficientes no se llega a consultar el histórico
@@ -721,7 +721,7 @@ class TestFronteraEficiente:
         cartera_id = self._crear_cartera(auth_client, posiciones)
         series = {"AAA": _serie_mensual(61, 0), "NEW": _serie_mensual(6, 1)}
         with self._mock_precios(posiciones, series)[0]:
-            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/markowitz")
         assert r.status_code == 400
         detail = r.json()["detail"]
         assert "al menos 2" in detail
@@ -736,7 +736,7 @@ class TestFronteraEficiente:
             "CCC": _serie_mensual(13, 2),
         }
         with self._mock_precios(self.POSICIONES, series)[0]:
-            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/markowitz")
         assert r.status_code == 400
         assert "observaciones" in r.json()["detail"]
 
@@ -744,7 +744,7 @@ class TestFronteraEficiente:
         cartera_id = self._crear_cartera(auth_client, self.POSICIONES)
         error = ProveedorPreciosError("yfinance caído")
         with self._mock_precios(self.POSICIONES, error=error)[0]:
-            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/markowitz")
         assert r.status_code == 503
         assert "precios" in r.json()["detail"]
 
@@ -753,7 +753,7 @@ class TestFronteraEficiente:
         error = ProveedorPreciosError("yfinance caído")
         caplog.set_level(logging.WARNING, logger="app.routers.posiciones")
         with self._mock_precios(self.POSICIONES, error=error)[0]:
-            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/markowitz")
         assert r.status_code == 503
         # El detalle HTTP no filtra el error interno; el log sí lo conserva
         assert "yfinance caído" not in r.json()["detail"]
@@ -774,7 +774,7 @@ class TestFronteraEficiente:
         cartera_id = self._crear_cartera(auth_client, posiciones)
         series = self._series_completas(self.POSICIONES)
         with self._mock_precios(posiciones, series)[0]:
-            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/markowitz")
         assert r.status_code == 200, r.text
         data = r.json()
         assert sorted(data["tickers"]) == ["AAA", "BBB", "CCC"]
@@ -799,7 +799,7 @@ class TestFronteraEficiente:
         series = self._series_completas(self.POSICIONES)
         contexto, mensuales = self._mock_precios(posiciones, series)
         with contexto:
-            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/markowitz")
         assert r.status_code == 200, r.text
         data = r.json()
         # Solo se pide histórico de los activos con valor EUR conocido
@@ -824,7 +824,7 @@ class TestFronteraEficiente:
         )
         series = self._series_completas(posiciones)
         with self._mock_precios(posiciones, series, fx_rates={"USD": 1.1})[0]:
-            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/markowitz")
         assert r.status_code == 200, r.text
         data = r.json()
         assert data["excluidos"] == []
@@ -843,7 +843,7 @@ class TestFronteraEficiente:
             self._mock_precios(self.POSICIONES, series)[0],
             patch("app.routers.posiciones.run_in_threadpool", espia),
         ):
-            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/markowitz")
         assert r.status_code == 200, r.text
         espia.assert_awaited_once()
 
@@ -854,20 +854,26 @@ class TestFronteraEficiente:
         cartera_id = auth_client.post(
             f"{BASE}/carteras", json={"nombre": "Test"}
         ).json()["id"]
-        r = auth_client.get(
-            f"{BASE}/carteras/{cartera_id}/frontera-eficiente", params=params
-        )
+        r = auth_client.get(f"{BASE}/carteras/{cartera_id}/markowitz", params=params)
         assert r.status_code == 422
 
     def test_cartera_inexistente_retorna_404(self, auth_client):
-        r = auth_client.get(f"{BASE}/carteras/9999/frontera-eficiente")
+        r = auth_client.get(f"{BASE}/carteras/9999/markowitz")
         assert r.status_code == 404
 
     def test_cartera_ajena_retorna_404(self, auth_client, second_auth_client):
         foreign_id = self._crear_cartera(second_auth_client, self.POSICIONES)
         contexto, mensuales = self._mock_precios(self.POSICIONES)
         with contexto:
-            r = auth_client.get(f"{BASE}/carteras/{foreign_id}/frontera-eficiente")
+            r = auth_client.get(f"{BASE}/carteras/{foreign_id}/markowitz")
+        assert r.status_code == 404
+        mensuales.assert_not_called()
+
+    def test_ruta_antigua_frontera_eficiente_ya_no_existe(self, auth_client):
+        cartera_id = self._crear_cartera(auth_client, self.POSICIONES)
+        contexto, mensuales = self._mock_precios(self.POSICIONES)
+        with contexto:
+            r = auth_client.get(f"{BASE}/carteras/{cartera_id}/frontera-eficiente")
         assert r.status_code == 404
         mensuales.assert_not_called()
 
@@ -1237,7 +1243,7 @@ class TestOwnershipAuthorization:
         assert client.get(f"{BASE}/carteras/1/resumen").status_code == 401
         assert client.get(f"{BASE}/carteras/1/analisis").status_code == 401
         assert client.post(f"{BASE}/carteras/1/backfill-fx").status_code == 401
-        assert client.get(f"{BASE}/carteras/1/frontera-eficiente").status_code == 401
+        assert client.get(f"{BASE}/carteras/1/markowitz").status_code == 401
 
     # -- Carteras are scoped to the owner -------------------------------------
 
