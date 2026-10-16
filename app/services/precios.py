@@ -17,6 +17,7 @@ import asyncio
 from datetime import date, timedelta
 
 import httpx
+import pandas as pd
 import yfinance as yf
 
 _YAHOO_HEADERS = {
@@ -277,6 +278,116 @@ async def obtener_precios_by_date_batch(
         for ticker, precio in zip(tickers, resultados)
         if isinstance(precio, float)
     }  # noqa: B905
+
+
+# ── Series históricas mensuales ───────────────────────────────────────────────
+
+
+class ProveedorPreciosError(RuntimeError):
+    """
+    El proveedor de precios (yfinance) ha fallado o no ha devuelto ningún dato
+    utilizable. Distinto de "un ticker no tiene histórico": la capa de API lo
+    traduce a un error del servicio externo (503), nunca a datos insuficientes.
+    """
+
+
+def _hoy() -> date:
+    """Fecha actual, aislada para poder fijarla en los tests."""
+    return date.today()
+
+
+def fin_ultimo_mes_completo(hoy: date | None = None) -> date:
+    """
+    Último día del último mes ya cerrado. El mes en curso (incompleto) nunca
+    cuenta, ni siquiera el día 1: hoy=2026-10-04 -> 2026-09-30.
+    """
+    return (hoy or _hoy()).replace(day=1) - timedelta(days=1)
+
+
+async def obtener_precios_mensuales_batch(
+    tickers: list[str], fecha_inicio: date, fecha_fin: date
+) -> dict[str, list[tuple[date, float]]]:
+    """
+    Obtiene las series de cierres mensuales ajustados (dividendos y splits)
+    de varios tickers con una única descarga de yfinance.
+
+    Devuelve {ticker: [(primer_dia_del_mes, cierre), ...]} ordenado por fecha,
+    en la moneda nativa de cada instrumento. Solo incluye meses cerrados (nunca
+    el mes en curso) y no posteriores a `fecha_fin`. Los tickers sin datos se
+    omiten; si la descarga falla o no trae datos de ningún ticker lanza
+    ProveedorPreciosError.
+    """
+    tickers_unicos = list(dict.fromkeys(t for t in tickers if t))
+    if not tickers_unicos:
+        return {}
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, _fetch_precios_mensuales, tickers_unicos, fecha_inicio, fecha_fin
+    )
+
+
+def _fetch_precios_mensuales(
+    tickers: list[str], fecha_inicio: date, fecha_fin: date
+) -> dict[str, list[tuple[date, float]]]:
+    """
+    Descarga (síncrona) los cierres mensuales ajustados de todos los tickers.
+
+    Las fechas se normalizan al primer día del mes para poder alinear
+    instrumentos de mercados distintos; si yfinance devuelve dos filas del
+    mismo mes prevalece la más reciente. Los NaN se descartan, igual que las
+    filas del mes en curso (incompleto) o posteriores a `fecha_fin`.
+
+    yfinance a menudo no lanza excepción ante un fallo: lo registra y devuelve
+    columnas vacías o todo NaN. Por eso, si ningún ticker trae ni un cierre se
+    considera fallo del proveedor y no "sin datos".
+    """
+    try:
+        df = yf.download(
+            tickers,
+            start=str(fecha_inicio),
+            end=str(fecha_fin + timedelta(days=1)),
+            interval="1mo",
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+        )
+    except Exception as e:
+        raise ProveedorPreciosError(
+            f"Error descargando precios mensuales de {tickers}: {e}"
+        ) from e
+
+    if df is None or df.empty or "Close" not in df.columns.get_level_values(0):
+        raise ProveedorPreciosError(
+            f"La descarga de precios mensuales de {tickers} no devolvió datos"
+        )
+
+    cierres = df["Close"]
+    if isinstance(cierres, pd.Series):
+        # Un solo ticker con columnas planas: la Serie es directamente su cierre
+        cierres = cierres.to_frame(name=tickers[0])
+
+    # Primer día del mes en curso: a partir de él nada está cerrado todavía
+    mes_en_curso = _hoy().replace(day=1)
+    hay_datos = False
+    resultado: dict[str, list[tuple[date, float]]] = {}
+    for ticker in tickers:
+        if ticker not in cierres.columns:
+            continue
+        por_mes: dict[date, float] = {}
+        for fecha, valor in cierres[ticker].dropna().sort_index().items():
+            hay_datos = True
+            marca = pd.Timestamp(fecha)
+            mes = date(marca.year, marca.month, 1)
+            if mes < mes_en_curso and mes <= fecha_fin:
+                por_mes[mes] = float(valor)
+        if por_mes:
+            resultado[ticker] = sorted(por_mes.items())
+
+    if not hay_datos:
+        raise ProveedorPreciosError(
+            f"La descarga de precios mensuales de {tickers} no trajo ningún cierre"
+        )
+    return resultado
 
 
 # ── FX rate helpers ───────────────────────────────────────────────────────────

@@ -7,6 +7,8 @@ pydantic>=2.13.4
 email-validator>=2.2.0
 alembic>=1.18.4
 yfinance>=1.4.0
+numpy>=2.0
+scipy>=1.13
 psycopg2-binary==2.9.12
 
 # Auth

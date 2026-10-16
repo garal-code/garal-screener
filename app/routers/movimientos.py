@@ -51,7 +51,7 @@ async def crear_movimiento(
         db.add(instrumento)
         db.flush()  # obtenemos instrumento.id sin hacer commit aun
 
-    # Validar venta: no puedes vender mas de lo que tienes
+    # Validar venta: no puedes vender mas de lo que tienes. Cada venta recorre todos los movimientos(WARN)
     if data.tipo == "venta":
         movs = (
             db.query(models.Movimiento)

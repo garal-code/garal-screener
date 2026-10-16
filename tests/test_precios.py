@@ -12,7 +12,9 @@ import pandas as pd
 import pytest
 
 from app.services.precios import (
+    ProveedorPreciosError,
     buscar_ticker_por_isin,
+    fin_ultimo_mes_completo,
     obtener_fx,
     obtener_fx_batch,
     obtener_fx_by_date,
@@ -20,6 +22,7 @@ from app.services.precios import (
     obtener_precio_by_date,
     obtener_precios_batch,
     obtener_precios_by_date_batch,
+    obtener_precios_mensuales_batch,
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -361,3 +364,231 @@ class TestObtenerFxBatch:
             await obtener_fx_batch(["USD", "USD", "usd"])
         # Solo debe llamarse una vez (set de monedas únicas)
         assert len(calls) == 1
+
+
+# ── obtener_precios_mensuales_batch ───────────────────────────────────────────
+
+
+def _df_descarga_multi(datos: dict[str, list[float]], fechas: list[str]):
+    """Simula yf.download con varios tickers: columnas MultiIndex (Price, Ticker)."""
+    columnas = pd.MultiIndex.from_tuples(
+        [(campo, t) for campo in ("Close", "Open") for t in datos],
+        names=["Price", "Ticker"],
+    )
+    valores = {
+        (campo, t): serie for campo in ("Close", "Open") for t, serie in datos.items()
+    }
+    return pd.DataFrame(valores, index=pd.to_datetime(fechas), columns=columnas)
+
+
+class TestFetchPreciosMensuales:
+    FECHAS = ["2024-01-01", "2024-02-01", "2024-03-01"]
+
+    def test_varios_tickers_devuelve_series_ordenadas(self):
+        from app.services.precios import _fetch_precios_mensuales
+
+        df = _df_descarga_multi(
+            {"AAPL": [100.0, 110.0, 121.0], "MSFT": [50.0, 55.0, 60.5]}, self.FECHAS
+        )
+        with patch("yfinance.download", return_value=df) as mock_dl:
+            result = _fetch_precios_mensuales(
+                ["AAPL", "MSFT"], _date(2024, 1, 1), _date(2024, 3, 31)
+            )
+        # Una única descarga para todos los tickers, mensual y ajustada
+        mock_dl.assert_called_once()
+        kwargs = mock_dl.call_args.kwargs
+        assert kwargs["interval"] == "1mo"
+        assert kwargs["auto_adjust"] is True
+        assert result == {
+            "AAPL": [
+                (_date(2024, 1, 1), 100.0),
+                (_date(2024, 2, 1), 110.0),
+                (_date(2024, 3, 1), 121.0),
+            ],
+            "MSFT": [
+                (_date(2024, 1, 1), 50.0),
+                (_date(2024, 2, 1), 55.0),
+                (_date(2024, 3, 1), 60.5),
+            ],
+        }
+
+    def test_un_ticker_con_columnas_planas(self):
+        from app.services.precios import _fetch_precios_mensuales
+
+        df = pd.DataFrame(
+            {"Close": [10.0, 11.0], "Open": [9.0, 10.5]},
+            index=pd.to_datetime(self.FECHAS[:2]),
+        )
+        with patch("yfinance.download", return_value=df):
+            result = _fetch_precios_mensuales(
+                ["SAN.MC"], _date(2024, 1, 1), _date(2024, 2, 28)
+            )
+        assert result == {
+            "SAN.MC": [(_date(2024, 1, 1), 10.0), (_date(2024, 2, 1), 11.0)]
+        }
+
+    def test_un_ticker_con_columnas_multiindex(self):
+        from app.services.precios import _fetch_precios_mensuales
+
+        df = _df_descarga_multi({"SAN.MC": [10.0, 11.0]}, self.FECHAS[:2])
+        with patch("yfinance.download", return_value=df):
+            result = _fetch_precios_mensuales(
+                ["SAN.MC"], _date(2024, 1, 1), _date(2024, 2, 28)
+            )
+        assert result == {
+            "SAN.MC": [(_date(2024, 1, 1), 10.0), (_date(2024, 2, 1), 11.0)]
+        }
+
+    def test_ticker_sin_datos_se_omite_y_nan_se_descartan(self):
+        from app.services.precios import _fetch_precios_mensuales
+
+        nan = float("nan")
+        df = _df_descarga_multi(
+            {"AAPL": [100.0, nan, 121.0], "BAD": [nan, nan, nan]}, self.FECHAS
+        )
+        with patch("yfinance.download", return_value=df):
+            result = _fetch_precios_mensuales(
+                ["AAPL", "BAD"], _date(2024, 1, 1), _date(2024, 3, 31)
+            )
+        assert result == {
+            "AAPL": [(_date(2024, 1, 1), 100.0), (_date(2024, 3, 1), 121.0)]
+        }
+
+    def test_fechas_se_normalizan_al_primer_dia_del_mes(self):
+        from app.services.precios import _fetch_precios_mensuales
+
+        # El mes en curso puede venir fechado a mitad de mes; si coincide con
+        # otra fila del mismo mes prevalece la más reciente.
+        df = _df_descarga_multi(
+            {"AAPL": [100.0, 110.0, 112.0], "MSFT": [50.0, 55.0, 56.0]},
+            ["2024-01-01", "2024-02-01", "2024-02-15"],
+        )
+        with patch("yfinance.download", return_value=df):
+            result = _fetch_precios_mensuales(
+                ["AAPL", "MSFT"], _date(2024, 1, 1), _date(2024, 2, 15)
+            )
+        assert result["AAPL"] == [
+            (_date(2024, 1, 1), 100.0),
+            (_date(2024, 2, 1), 112.0),
+        ]
+
+    def test_error_de_red_lanza_error_de_proveedor(self):
+        from app.services.precios import _fetch_precios_mensuales
+
+        # Un fallo del proveedor nunca debe confundirse con "sin datos"
+        with patch("yfinance.download", side_effect=ConnectionError("timeout")):
+            with pytest.raises(ProveedorPreciosError):
+                _fetch_precios_mensuales(
+                    ["AAPL"], _date(2024, 1, 1), _date(2024, 3, 31)
+                )
+
+    def test_descarga_vacia_lanza_error_de_proveedor(self):
+        from app.services.precios import _fetch_precios_mensuales
+
+        with patch("yfinance.download", return_value=pd.DataFrame()):
+            with pytest.raises(ProveedorPreciosError):
+                _fetch_precios_mensuales(
+                    ["AAPL"], _date(2024, 1, 1), _date(2024, 3, 31)
+                )
+
+    def test_todo_nan_lanza_error_de_proveedor(self):
+        from app.services.precios import _fetch_precios_mensuales
+
+        # yfinance suele registrar el fallo y devolver columnas vacías en vez
+        # de lanzar una excepción
+        nan = float("nan")
+        df = _df_descarga_multi(
+            {"AAPL": [nan, nan, nan], "MSFT": [nan, nan, nan]}, self.FECHAS
+        )
+        with patch("yfinance.download", return_value=df):
+            with pytest.raises(ProveedorPreciosError):
+                _fetch_precios_mensuales(
+                    ["AAPL", "MSFT"], _date(2024, 1, 1), _date(2024, 3, 31)
+                )
+
+    def test_mes_en_curso_nunca_se_devuelve(self):
+        from app.services.precios import _fetch_precios_mensuales
+
+        # Aunque el rango pedido incluya el mes en curso (incompleto), su fila
+        # no se usa: solo cuentan meses ya cerrados.
+        df = _df_descarga_multi(
+            {"AAPL": [100.0, 110.0, 115.0]},
+            ["2026-08-01", "2026-09-01", "2026-10-03"],
+        )
+        with (
+            patch("app.services.precios._hoy", return_value=_date(2026, 10, 4)),
+            patch("yfinance.download", return_value=df),
+        ):
+            result = _fetch_precios_mensuales(
+                ["AAPL"], _date(2026, 8, 1), _date(2026, 10, 4)
+            )
+        assert result == {
+            "AAPL": [(_date(2026, 8, 1), 100.0), (_date(2026, 9, 1), 110.0)]
+        }
+
+    def test_solo_el_mes_en_curso_no_es_fallo_del_proveedor(self):
+        from app.services.precios import _fetch_precios_mensuales
+
+        # Un valor recién listado solo tiene el mes en curso: sin histórico
+        # utilizable, pero el proveedor sí respondió.
+        df = _df_descarga_multi({"NEW": [10.0]}, ["2026-10-03"])
+        with (
+            patch("app.services.precios._hoy", return_value=_date(2026, 10, 4)),
+            patch("yfinance.download", return_value=df),
+        ):
+            result = _fetch_precios_mensuales(
+                ["NEW"], _date(2026, 8, 1), _date(2026, 10, 4)
+            )
+        assert result == {}
+
+
+class TestFinUltimoMesCompleto:
+    def test_ultimo_dia_del_mes_anterior(self):
+        assert fin_ultimo_mes_completo(_date(2026, 10, 4)) == _date(2026, 9, 30)
+
+    def test_primer_dia_del_mes_tampoco_cuenta_el_mes_en_curso(self):
+        assert fin_ultimo_mes_completo(_date(2026, 3, 1)) == _date(2026, 2, 28)
+
+    def test_enero_cierra_en_diciembre_del_anio_anterior(self):
+        assert fin_ultimo_mes_completo(_date(2026, 1, 15)) == _date(2025, 12, 31)
+
+    def test_por_defecto_usa_la_fecha_actual(self):
+        with patch("app.services.precios._hoy", return_value=_date(2024, 3, 10)):
+            assert fin_ultimo_mes_completo() == _date(2024, 2, 29)
+
+
+class TestObtenerPreciosMensualesBatch:
+    @pytest.mark.asyncio
+    async def test_lista_vacia_no_llama_a_yfinance(self):
+        with patch("app.services.precios._fetch_precios_mensuales") as mock_fetch:
+            result = await obtener_precios_mensuales_batch(
+                [], _date(2024, 1, 1), _date(2024, 3, 31)
+            )
+        assert result == {}
+        mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_deduplica_tickers_y_delega_en_una_descarga(self):
+        serie = [(_date(2024, 1, 1), 100.0)]
+        with patch(
+            "app.services.precios._fetch_precios_mensuales",
+            return_value={"AAPL": serie},
+        ) as mock_fetch:
+            result = await obtener_precios_mensuales_batch(
+                ["AAPL", "AAPL", ""], _date(2024, 1, 1), _date(2024, 3, 31)
+            )
+        assert result == {"AAPL": serie}
+        mock_fetch.assert_called_once_with(
+            ["AAPL"], _date(2024, 1, 1), _date(2024, 3, 31)
+        )
+
+    @pytest.mark.asyncio
+    async def test_error_de_proveedor_se_propaga(self):
+        with patch(
+            "app.services.precios._fetch_precios_mensuales",
+            side_effect=ProveedorPreciosError("caído"),
+        ):
+            with pytest.raises(ProveedorPreciosError):
+                await obtener_precios_mensuales_batch(
+                    ["AAPL"], _date(2024, 1, 1), _date(2024, 3, 31)
+                )

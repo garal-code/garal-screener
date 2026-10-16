@@ -10,7 +10,7 @@ router = APIRouter(prefix="/instrumentos", tags=["Instrumentos"])
 
 @router.get("/autodescubrir/{isin}", response_model=schemas.InstrumentoOut)
 async def autodescubrir(isin: str, db: Session = Depends(get_db)):
-    """Busca o crea un instrumento por ISIN usando Gemini para metadatos."""
+    """Busca o crea un instrumento por ISIN para metadatos."""
     isin = isin.strip().upper()
     instrumento = (
         db.query(models.Instrumento).filter(models.Instrumento.isin == isin).first()
