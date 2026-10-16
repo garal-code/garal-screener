@@ -6,11 +6,24 @@ from sqlalchemy.orm import Session, sessionmaker
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./cartera.db")
 
-# Railway usa postgres:// (legacy), SQLAlchemy requiere postgresql://
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+def normalize_database_url(url: str) -> str:
+    """Pin the PostgreSQL driver to psycopg2, the one in requirements.txt.
+
+    Railway hands out the legacy `postgres://` scheme, and since SQLAlchemy
+    2.1 a bare `postgresql://` resolves to psycopg (v3), which is not
+    installed. URLs that already name a driver, and non-Postgres URLs, are
+    returned unchanged.
+    """
+    for scheme in ("postgres://", "postgresql://"):
+        if url.startswith(scheme):
+            return "postgresql+psycopg2://" + url[len(scheme) :]
+    return url
+
+
+DATABASE_URL = normalize_database_url(
+    os.getenv("DATABASE_URL", "sqlite:///./cartera.db")
+)
 
 # SQLite necesita check_same_thread=False para funcionar con FastAPI
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
