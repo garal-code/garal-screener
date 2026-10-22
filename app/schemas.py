@@ -201,6 +201,68 @@ class PlantillaImportacionOut(BaseModel):
     updated_at: datetime
 
 
+# Largest CSV accepted by the import endpoints (characters)
+MAX_CONTENIDO_CSV = 2_000_000
+
+ContenidoCsv = Annotated[str, Field(max_length=MAX_CONTENIDO_CSV)]
+
+
+class InspeccionarIn(BaseModel):
+    contenido: ContenidoCsv
+    delimitador: Literal[",", ";", "\t", "|"] | None = None
+
+
+class InspeccionarOut(BaseModel):
+    delimitador: str
+    columnas: list[str]
+    filas_muestra: list[list[str]]
+    valores_distintos: dict[str, list[str]]
+
+
+class PrevisualizarImportacionIn(BaseModel):
+    contenido: ContenidoCsv
+    plantilla_id: int
+
+
+class ConfirmarImportacionIn(PrevisualizarImportacionIn):
+    # `huella` returned by the preview of this same file and template
+    huella: str
+
+
+class FilaImportacionOut(BaseModel):
+    """One data row of the CSV. Rows skipped while reading have no data."""
+
+    linea: int
+    estado: Literal["importar", "omitir"]
+    motivo: str | None
+    tipo: str | None
+    fecha: date | None
+    isin: str | None
+    nombre: str | None
+    cantidad: float | None
+    precio: float | None
+    comision: float | None
+    tipo_cambio: float | None
+    referencia: str | None
+
+
+class ResumenImportacionOut(BaseModel):
+    total: int
+    importar: int
+    omitir: int
+
+
+class PrevisualizacionImportacionOut(BaseModel):
+    huella: str
+    resumen: ResumenImportacionOut
+    filas: list[FilaImportacionOut]
+
+
+class ResultadoImportacionOut(BaseModel):
+    importados: int
+    omitidos: int
+
+
 # -- Posicion calculada -------------------------------------------------------
 
 

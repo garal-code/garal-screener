@@ -47,16 +47,36 @@ Branches: backend `feat/importar-csv` (from `origin/develop`, 9b6ed8d); frontend
 - **D6 Safety** — Preview writes nothing. Confirm recomputes the plan, requires the preview `huella`
   (409 when it differs), and inserts the rows and any new instruments in one transaction. Limits: `contenido`
   at most 2,000,000 characters, at most 5,000 data rows. A template column missing from the CSV header → 400.
+- **D7 API contract** (all under `/api/v1`, cookie auth; unauthenticated → 401; body validation → 422):
+  - `POST /importaciones/inspeccionar` body `{"contenido": str, "delimitador": ","|";"|"\t"|"|"|null}` → 200
+    `{"delimitador", "columnas": [str], "filas_muestra": [[str]] (≤5), "valores_distintos": {col: [str]}}`
+    (output of `services.importacion.inspeccionar`); `ImportacionError` → 400 `{"detail": <message>}`.
+  - `POST /carteras/{cartera_id}/importaciones/previsualizar` body `{"contenido": str, "plantilla_id": int}` → 200
+    `{"huella": str, "resumen": {"total", "importar", "omitir"}, "filas": [Fila]}`, `filas` ordered by `linea`.
+    `Fila` = `{"linea": int, "estado": "importar"|"omitir", "motivo": str|null, "tipo", "fecha", "isin",
+    "nombre", "cantidad", "precio", "comision", "tipo_cambio", "referencia"}`; rows skipped by normalization have
+    every data field null; rows skipped later keep their normalized fields; `nombre` = instrument name when known.
+    Missing/foreign cartera → 404 "Cartera no encontrada"; missing/foreign template → 404 "Plantilla no
+    encontrada"; `ImportacionError` → 400. Writes nothing (no instruments, no movements).
+  - `POST /carteras/{cartera_id}/importaciones` body `{"contenido", "plantilla_id", "huella"}` → 200
+    `{"importados": int, "omitidos": int}`. Recomputed `huella` differs → 409 "La previsualización ya no coincide
+    con los datos actuales. Vuelve a previsualizar." and nothing written. Same 400/404 as preview.
+  - Reasons added after normalization, rows processed by (`fecha`, `linea`): "Duplicada en el archivo (ID X)"
+    (an earlier line has the same `referencia`), "Ya importada (ID X)" (`referencia_externa` already in the
+    cartera), "No se encontraron datos para el ISIN X" (not in `instrumentos` and enrichment fails),
+    "Venta de N supera la posición disponible (M)" (FIFO position from existing cartera movements plus accepted
+    earlier rows; numbers without trailing zeros).
+  - `huella` = SHA-256 hex of the canonical JSON of `filas`.
 
 ## Tasks
 
 - [x] T1 — S2, S7 · Backend model, migration, template config schema, template CRUD + tests · inline ·
   commit `f2f60dd`
 - [x] T2 — S1, S3, S5, S6 · Backend CSV parsing/normalization service + unit tests (synthetic T212- and
-  TR-shaped fixtures, plus a `;`/decimal-comma/`%d/%m/%Y` case) · inline · commit: the one adding
-  `app/services/importacion.py`
-- [ ] T3 — S4, S5, S6, S7 · Backend inspect, preview, confirm endpoints + `docs/importacion.md` + tests · inline
-  · commit: pending
+  TR-shaped fixtures, plus a `;`/decimal-comma/`%d/%m/%Y` case) · inline · commit `b71b2ca`
+- [x] T3 — S4, S5, S6, S7, D4-D7 · Backend inspect, preview, confirm endpoints + `docs/importacion.md` + tests ·
+  `gentle-ai-worker` (context backstop) · commit: the `feat(importacion): preview and confirm` commit after
+  `d66d223` (full suite 331 passed)
 - [ ] T4 — S2, S4 · Frontend types, API client, import page (upload, mapping editor, save template, preview,
   confirm), sidebar link + tests · inline · commit: pending (UI repo)
 - [ ] T5 — S1-S8 · Independent verification (high-risk item 1: migration and bulk data writes) ·
@@ -85,3 +105,15 @@ Branches: backend `feat/importar-csv` (from `origin/develop`, 9b6ed8d); frontend
 - **L8** (evidence): T1 `f2f60dd` — 22 template tests; full suite 251 passed; ruff/black/mypy clean; migration
   upgrade → downgrade → upgrade round-trip on scratch SQLite, autogenerate shows no drift for the new objects.
   T2 — 36 service tests passed.
+- **L9** (evidence): T3 by `gentle-ai-worker` mvjvv7rg-1-epw2 — RED 8 failed/32 errors, GREEN 63 in
+  `tests/test_importacion.py`, full suite 328 passed. Parent spot check found that an accepted sale within the
+  1e-9 tolerance broke `GET /carteras/{id}/resumen` with `VentaInvalidaError` (reproduced by
+  `test_venta_dentro_de_la_tolerancia_no_rompe_el_resumen`).
+- **L10** (evidence, pre-existing bug): the user's real Trade Republic pattern (buy 84.575791 + 5.909452, sell
+  90.485243) raises `VentaInvalidaError` in `calculos.calcular_posicion_fifo` because
+  90.485243 - 84.575791 = 5.909452000000002, while the manual sale check (`movimientos.py:56`) accepts it.
+  Fixed in `d66d223` (`fix(calculos)`): remainders up to 1e-9 count as sold; lot consumption unchanged.
+  Differential vs HEAD on 3,000 random histories: 2,879 identical, 121 old-raised-now-ok, 0 other differences.
+  Import sale check now tries the sale with that same FIFO (accepted iff FIFO covers it).
+- **L11** (follow-up, not done): FIFO keeps float-noise "ghost lots" (quantity ~1e-15, shown as 0.0 in
+  `lotes_pendientes`) and a meaningless `precio_medio` on such closed positions; pre-existing, left unchanged.

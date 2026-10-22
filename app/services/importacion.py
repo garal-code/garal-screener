@@ -8,17 +8,27 @@ Messages are user-facing, in Spanish, like the rest of the API.
 
 import csv
 import io
+import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import cast
 
+from app.models import Movimiento
 from app.schemas import PlantillaConfig
+from app.services.calculos import VentaInvalidaError, calcular_posicion_fifo
+
+logger = logging.getLogger(__name__)
 
 MAX_FILAS = 5000
 FILAS_MUESTRA = 5
 # Columns with more distinct values are not offered for value mapping
 MAX_VALORES_DISTINTOS = 20
 DELIMITADORES = (",", ";", "\t", "|")
+
+# Simulated import rows sort after the stored movements of the same day
+ID_BASE_SIMULADO = 10**12
 
 ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
 # Date part of an ISO date or datetime: 2025-02-04, 2025-02-04 08:00:01, ...T13:46Z
@@ -282,3 +292,190 @@ def normalizar_fila(
         )
     except _OmitirError as omitir:
         return FilaOmitida(linea=fila.linea, motivo=str(omitir))
+
+
+def leer_y_normalizar(
+    contenido: str, config: PlantillaConfig
+) -> list[FilaNormalizada | FilaOmitida]:
+    """Read the file with the template and normalize every data row."""
+    tabla = leer_csv(contenido, config.delimitador)
+    validar_columnas(tabla, config)
+    return [normalizar_fila(fila, config) for fila in tabla.filas]
+
+
+# ── Planning ─────────────────────────────────────────────────────────────────
+
+Enriquecedor = Callable[[str], Awaitable[dict | None]]
+
+
+@dataclass(frozen=True)
+class FilaPlan:
+    linea: int
+    estado: str  # importar | omitir
+    motivo: str | None
+    # None when the row was skipped while reading
+    fila: FilaNormalizada | None
+    nombre: str | None
+
+
+@dataclass(frozen=True)
+class Plan:
+    filas: list[FilaPlan]  # ordered by linea
+    # Metadata of the ISINs that were not in the database, fetched once each
+    enriquecidos: dict[str, dict]
+
+
+@dataclass(frozen=True)
+class _MovimientoSimulado:
+    """The attributes `calculos.calcular_posicion_fifo` reads from a movement."""
+
+    id: int
+    tipo: str
+    fecha: date
+    cantidad: float
+    precio: float
+    comision: float
+    tipo_cambio: float | None
+
+
+def formatear_cantidad(valor: float) -> str:
+    """19.5432430 -> '19.543243', 0.0 -> '0'."""
+    texto = f"{valor:.10f}".rstrip("0").rstrip(".")
+    return texto if texto not in ("", "-0") else "0"
+
+
+def _posicion_disponible(movimientos: list) -> float:
+    try:
+        posicion = calcular_posicion_fifo(cast(list[Movimiento], movimientos))
+    except VentaInvalidaError:
+        # Stored history already sells more than it buys: nothing is available
+        return 0.0
+    return float(posicion["cantidad_actual"])
+
+
+def _motivo_referencia(
+    fila: FilaNormalizada, vistas: set[str], existentes: set[str]
+) -> str | None:
+    """Duplicate-ID reason; records the row's ID as seen."""
+    if not fila.referencia:
+        return None
+    motivo = None
+    if fila.referencia in vistas:
+        motivo = f"Duplicada en el archivo (ID {fila.referencia})"
+    elif fila.referencia in existentes:
+        motivo = f"Ya importada (ID {fila.referencia})"
+    vistas.add(fila.referencia)
+    return motivo
+
+
+async def _enriquecer_una_vez(
+    isin: str, enriquecidos: dict[str, dict | None], enriquecer: Enriquecedor
+) -> dict | None:
+    if isin not in enriquecidos:
+        try:
+            enriquecidos[isin] = await enriquecer(isin)
+        except Exception:
+            logger.exception("Enriquecimiento fallido para %s", isin)
+            enriquecidos[isin] = None
+    return enriquecidos[isin]
+
+
+def _comprobar_venta(fila: FilaNormalizada, movimientos: list) -> str | None:
+    """Reason when FIFO cannot cover the sale after `movimientos`, else None.
+
+    The sale is tried with the same FIFO that later computes the position, so
+    an accepted row can never make the stored history invalid.
+    """
+    venta = _MovimientoSimulado(
+        id=ID_BASE_SIMULADO + len(movimientos),
+        tipo=fila.tipo,
+        fecha=fila.fecha,
+        cantidad=fila.cantidad,
+        precio=fila.precio,
+        comision=fila.comision,
+        tipo_cambio=fila.tipo_cambio,
+    )
+    try:
+        calcular_posicion_fifo(cast(list[Movimiento], [*movimientos, venta]))
+    except VentaInvalidaError:
+        disponible = _posicion_disponible(movimientos)
+        return (
+            f"Venta de {formatear_cantidad(fila.cantidad)} supera la "
+            f"posición disponible ({formatear_cantidad(disponible)})"
+        )
+    return None
+
+
+async def planificar(
+    resultados: list[FilaNormalizada | FilaOmitida],
+    referencias_existentes: set[str],
+    nombres_conocidos: dict[str, str | None],
+    movimientos_existentes: dict[str, list],
+    enriquecer: Enriquecedor,
+) -> Plan:
+    """Decide which normalized rows are imported and why the others are not.
+
+    No database access: the caller supplies what is already stored.
+
+    Args:
+        resultados: output of `leer_y_normalizar`.
+        referencias_existentes: `referencia_externa` already in the cartera.
+        nombres_conocidos: ISIN -> name of the instruments already in the database.
+        movimientos_existentes: ISIN -> cartera movements of that instrument.
+        enriquecer: fetches metadata of an unknown ISIN (None when not found).
+            Called at most once per ISIN; an exception counts as not found.
+
+    Rows are processed by (fecha, linea). A sale is checked against the FIFO
+    position of the stored movements plus the rows accepted before it.
+    """
+    planes: dict[int, FilaPlan] = {}
+    normalizadas: list[FilaNormalizada] = []
+    for resultado in resultados:
+        if isinstance(resultado, FilaOmitida):
+            planes[resultado.linea] = FilaPlan(
+                resultado.linea, "omitir", resultado.motivo, None, None
+            )
+        else:
+            normalizadas.append(resultado)
+
+    enriquecidos: dict[str, dict | None] = {}
+    historial = {isin: list(movs) for isin, movs in movimientos_existentes.items()}
+    referencias_vistas: set[str] = set()
+
+    for fila in sorted(normalizadas, key=lambda f: (f.fecha, f.linea)):
+        nombre = nombres_conocidos.get(fila.isin)
+        motivo = _motivo_referencia(fila, referencias_vistas, referencias_existentes)
+
+        if motivo is None and fila.isin not in nombres_conocidos:
+            datos = await _enriquecer_una_vez(fila.isin, enriquecidos, enriquecer)
+            if datos:
+                nombre = datos.get("nombre")
+            else:
+                motivo = f"No se encontraron datos para el ISIN {fila.isin}"
+
+        if motivo is None and fila.tipo == "venta":
+            movs = historial.setdefault(fila.isin, [])
+            motivo = _comprobar_venta(fila, movs)
+
+        if motivo is None:
+            historial.setdefault(fila.isin, []).append(
+                _MovimientoSimulado(
+                    id=ID_BASE_SIMULADO + len(historial[fila.isin]),
+                    tipo=fila.tipo,
+                    fecha=fila.fecha,
+                    cantidad=fila.cantidad,
+                    precio=fila.precio,
+                    comision=fila.comision,
+                    tipo_cambio=fila.tipo_cambio,
+                )
+            )
+
+        if nombre is None and enriquecidos.get(fila.isin):
+            nombre = enriquecidos[fila.isin].get("nombre")  # type: ignore[union-attr]
+        estado = "importar" if motivo is None else "omitir"
+        planes[fila.linea] = FilaPlan(fila.linea, estado, motivo, fila, nombre)
+
+    return Plan(
+        filas=[planes[linea] for linea in sorted(planes)],
+        enriquecidos={isin: d for isin, d in enriquecidos.items() if d},
+    )
