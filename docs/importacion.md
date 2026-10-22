@@ -186,16 +186,16 @@ Textos exactos de `motivo` (en español, como el resto de la API).
 
 ### Al planificar (filas ya normalizadas)
 
-Se comprueban en este orden, procesando por (`fecha`, `linea`):
+Los duplicados se deciden por línea del archivo: gana la primera línea con cada `referencia`. El resto se comprueba en este orden, procesando por (`fecha`, `linea`):
 
 | Motivo | Causa |
 |---|---|
-| `Duplicada en el archivo (ID X)` | Una fila anterior en el orden de proceso tiene la misma `referencia` (aunque esa fila también se haya omitido) |
+| `Duplicada en el archivo (ID X)` | Una línea anterior del archivo tiene la misma `referencia` (aunque esa fila también se haya omitido por otro motivo) |
 | `Ya importada (ID X)` | Esa `referencia` ya está guardada como `referencia_externa` en la cartera |
 | `No se encontraron datos para el ISIN X` | El ISIN no está en `instrumentos` y el enriquecimiento no devuelve datos o falla |
 | `Venta de N supera la posición disponible (M)` | La venta supera la posición FIFO disponible |
 
-En la venta, la posición disponible `M` sale de `calculos.calcular_posicion_fifo` sobre los movimientos que la cartera ya tiene de ese instrumento más las filas aceptadas antes en el orden de proceso (una venta rechazada no resta posición). La venta se acepta si y solo si el FIFO de `calculos` puede cubrirla, con la misma tolerancia de `1e-9` que `calculos` aplica al ruido de coma flotante (vender toda una posición comprada en varios lotes). `N` y `M` se muestran sin ceros finales (`19.543243`, `0`).
+En la venta, la posición disponible `M` sale de `calculos.calcular_posicion_fifo` sobre los movimientos que la cartera ya tiene de ese instrumento más las filas aceptadas antes en el orden de proceso (una venta rechazada no resta posición). La venta se acepta si y solo si el FIFO de `calculos` puede cubrirla, con la misma tolerancia de `1e-9` que `calculos` aplica al ruido de coma flotante (vender toda una posición comprada en varios lotes). `N` y `M` se muestran sin ceros finales (`21.654321`, `0`).
 
 Las referencias son por cartera: el mismo ID de broker puede importarse en otra cartera.
 
@@ -210,6 +210,8 @@ Cuando el archivo entero no se puede leer, la petición responde `400` con `{"de
 | `El CSV tiene columnas sin nombre en la cabecera` |
 | `El CSV tiene columnas repetidas: A, B` |
 | `El CSV supera el máximo de 5000 filas` |
+| `El CSV no se puede leer: tiene un campo demasiado largo o una comilla sin cerrar` |
+| `El CSV no se puede leer: <error del lector CSV>` |
 | `La columna 'X' de la plantilla no existe en el CSV` |
 
 ## Seguridad y límites

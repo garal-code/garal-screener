@@ -9,12 +9,14 @@ exports (Trading212, Trade Republic) and contain no personal data.
 import copy
 import hashlib
 import json
+from datetime import date
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy.orm import Session
 
 from app import models
+from app.services import importacion
 from tests.test_api import mock_precios
 
 BASE = "/api/v1"
@@ -571,11 +573,11 @@ class TestPrevisualizar:
         cid, pid = escenario(auth_client)
         contenido = csv_t212(
             fila_csv("Market buy", "2025-02-01", US, "B1", "19.5", "10", "USD"),
-            fila_csv("Market sell", "2025-03-01", US, "S1", "19.543243", "12", "USD"),
+            fila_csv("Market sell", "2025-03-01", US, "S1", "21.654321", "12", "USD"),
         )
         r = previsualizar(auth_client, cid, contenido, pid)
         assert (
-            motivos(r)[3] == "Venta de 19.543243 supera la posición disponible (19.5)"
+            motivos(r)[3] == "Venta de 21.654321 supera la posición disponible (19.5)"
         )
 
     def test_tolerancia_de_1e9_en_la_venta(self, auth_client, enriquecer):
@@ -593,9 +595,9 @@ class TestPrevisualizar:
         contenido = csv_t212(
             fila_csv("Market buy", "2025-02-01", ES, "B1", "1", "10"),
             fila_csv("Market buy", "2025-02-02", ES, "B1", "2", "10"),
-            # earlier date than the line above: the first in (fecha, linea) order wins
-            fila_csv("Market buy", "2025-01-02", ES, "B2", "3", "10"),
-            fila_csv("Market buy", "2025-01-03", ES, "B2", "4", "10"),
+            # D7: the later line is the duplicate even when its date is earlier
+            fila_csv("Market buy", "2025-01-03", ES, "B2", "3", "10"),
+            fila_csv("Market buy", "2025-01-02", ES, "B2", "4", "10"),
         )
         r = previsualizar(auth_client, cid, contenido, pid)
         assert motivos(r) == {
@@ -942,3 +944,83 @@ class TestVentaConRuidoDeComaFlotante:
         with mock_precios():
             resumen = auth_client.get(f"{BASE}/carteras/{cid}/resumen")
         assert resumen.status_code == 200
+
+
+class TestArchivosIlegibles:
+    """S4, D7: a file the CSV reader rejects is a 400 with a reason, never a 500."""
+
+    MENSAJE = (
+        "El CSV no se puede leer: tiene un campo demasiado largo "
+        "o una comilla sin cerrar"
+    )
+
+    @pytest.mark.parametrize(
+        "contenido",
+        [
+            "a,b\n1," + "x" * 200_000 + "\n",
+            # An unclosed quote swallows the rest of the file into one field
+            csv_t212(
+                'Market buy,2025-01-01,ES0000000001,"Q,1,1,EUR,1.0,',
+                *[
+                    fila_csv("Market buy", "2025-01-01", ES, f"Q{i}", "1", "1")
+                    for i in range(3000)
+                ],
+            ),
+        ],
+        ids=["campo_enorme", "comilla_sin_cerrar"],
+    )
+    def test_campo_enorme_da_400(self, auth_client, enriquecer, contenido):
+        cid, pid = escenario(auth_client)
+        r_inspeccion = inspeccionar(auth_client, contenido)
+        r_preview = previsualizar(auth_client, cid, contenido, pid)
+        r_confirm = confirmar(auth_client, cid, contenido, pid, "0" * 64)
+        for r in (r_inspeccion, r_preview, r_confirm):
+            assert r.status_code == 400
+            assert r.json()["detail"] == self.MENSAJE
+        assert_sin_escrituras(auth_client, cid)
+
+
+class TestConfirmarAtomico:
+    """D6: a write conflict in the middle of the confirm rolls everything back."""
+
+    def test_conflicto_de_referencia_revierte_todo(
+        self, auth_client, enriquecer, db_session
+    ):
+        cid, pid = escenario(auth_client)
+        inst = models.Instrumento(isin=ES, nombre="Alpha")
+        db_session.add(inst)
+        db_session.commit()
+        db_session.add(
+            models.Movimiento(
+                cartera_id=cid,
+                instrumento_id=inst.id,
+                tipo="compra",
+                fecha=date(2025, 1, 1),
+                cantidad=1,
+                precio=1,
+                comision=0,
+                referencia_externa="R1",
+            )
+        )
+        db_session.commit()
+        contenido = csv_t212(
+            fila_csv("Market buy", "2025-01-05", US, "R0", "1", "1", "USD", "1.1"),
+            fila_csv("Market buy", "2025-01-06", ES, "R1", "1", "1"),
+        )
+        original = importacion.planificar
+
+        # Simulates a concurrent import: the plan misses the stored ID R1
+        async def sin_referencias(resultados, referencias, *args):
+            return await original(resultados, set(), *args)
+
+        with patch("app.routers.importaciones.importacion.planificar", sin_referencias):
+            huella = previsualizar(auth_client, cid, contenido, pid).json()["huella"]
+            r = confirmar(auth_client, cid, contenido, pid, huella)
+
+        assert r.status_code == 409
+        assert r.json()["detail"] == (
+            "La previsualización ya no coincide con los datos actuales. "
+            "Vuelve a previsualizar."
+        )
+        assert len(movimientos(auth_client, cid)) == 1
+        assert [i["isin"] for i in instrumentos(auth_client)] == [ES]
