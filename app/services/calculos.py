@@ -17,6 +17,11 @@ class VentaInvalidaError(ValueError):
     """Se lanza cuando se intenta vender más de lo disponible en los lotes FIFO."""
 
 
+# Float noise left when a sale consumes several lots (90.485243 - 84.575791 =
+# 5.909452000000002): below this, a remainder is not a real quantity
+TOLERANCIA_CANTIDAD = 1e-9
+
+
 def fecha_inicio_periodo(periodo: str, hoy: date | None = None) -> date:
     """
     Calcula la fecha de inicio de un periodo de rentabilidad relativo a hoy.
@@ -97,7 +102,7 @@ def calcular_posicion_fifo(
             cantidad_vender = movimientos_ordenados.cantidad
             coste_vendido = 0.0
 
-            while cantidad_vender > 0 and lotes:
+            while cantidad_vender > TOLERANCIA_CANTIDAD and lotes:
                 lote = lotes[0]
                 cantidad_lote, precio_lote, _ = lote
 
@@ -113,7 +118,7 @@ def calcular_posicion_fifo(
                     cantidad_vender = 0
 
             # Si después del while todavía queda por vender, los datos son inconsistentes
-            if cantidad_vender > 0:
+            if cantidad_vender > TOLERANCIA_CANTIDAD:
                 raise VentaInvalidaError(
                     f"Movimiento id={movimientos_ordenados.id}: intento de vender {movimientos_ordenados.cantidad} unidades "
                     f"pero los lotes FIFO no tienen suficiente stock."
