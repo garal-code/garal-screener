@@ -1,7 +1,16 @@
+import re
 from datetime import date, datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 # -- User / Auth ----------------------------------------------------------------
 
@@ -109,6 +118,87 @@ class MovimientoOut(BaseModel):
     tipo_cambio: float | None
     notas: str | None
     created_at: datetime
+
+
+# -- Importacion CSV -----------------------------------------------------------
+
+# A CSV header name or a cell value: surrounding spaces are ignored, empty is invalid
+TextoNoVacio = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+class ColumnasImportacion(BaseModel):
+    """CSV header that feeds each movement field."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fecha: TextoNoVacio
+    isin: TextoNoVacio
+    tipo: TextoNoVacio
+    cantidad: TextoNoVacio
+    precio: TextoNoVacio
+    # Commission = sum of these columns (brokers split fees across several)
+    comision: list[TextoNoVacio] = Field(default_factory=list)
+    tipo_cambio: TextoNoVacio | None = None
+    # Currency of the price column; EUR rows get tipo_cambio 1.0
+    moneda_precio: TextoNoVacio | None = None
+    # Broker transaction ID used to skip rows already imported
+    referencia: TextoNoVacio | None = None
+
+
+class PlantillaConfig(BaseModel):
+    """How to read one broker's CSV export."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # None = detect it from the file
+    delimitador: Literal[",", ";", "\t", "|"] | None = None
+    separador_decimal: Literal[".", ","] = "."
+    # None = ISO date or datetime (2025-02-04, 2025-02-04 08:00:01, ...T13:46:07Z)
+    formato_fecha: TextoNoVacio | None = None
+    columnas: ColumnasImportacion
+    # Case-insensitive exact values of the type column; any other value is skipped
+    valores_compra: list[TextoNoVacio] = Field(min_length=1)
+    valores_venta: list[TextoNoVacio] = Field(min_length=1)
+    # True when the broker quotes EUR per currency unit instead of units per EUR
+    invertir_tipo_cambio: bool = False
+
+    @field_validator("formato_fecha")
+    @classmethod
+    def _formato_con_directivas(cls, v: str | None) -> str | None:
+        if v is not None and not re.search(r"%[a-zA-Z]", v):
+            raise ValueError(
+                "formato_fecha debe usar directivas strptime, por ejemplo %d/%m/%Y"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _coherente(self) -> "PlantillaConfig":
+        compra = {v.casefold() for v in self.valores_compra}
+        comunes = sorted(v for v in self.valores_venta if v.casefold() in compra)
+        if comunes:
+            raise ValueError(
+                f"Un valor no puede ser de compra y venta a la vez: {', '.join(comunes)}"
+            )
+        if self.delimitador == self.separador_decimal:
+            raise ValueError("El delimitador no puede ser igual al separador decimal")
+        return self
+
+
+class PlantillaImportacionIn(BaseModel):
+    nombre: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
+    ]
+    config: PlantillaConfig
+
+
+class PlantillaImportacionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    nombre: str
+    config: PlantillaConfig
+    created_at: datetime
+    updated_at: datetime
 
 
 # -- Posicion calculada -------------------------------------------------------
