@@ -138,3 +138,8 @@ Branches: backend `feat/importar-csv` (from `origin/develop`, 9b6ed8d); frontend
   (`importaciones.py:220-227`, preview/confirm CPU work blocks the event loop), R1-002 (`importaciones.py:179-181`,
   ISIN enrichment per unknown ISIN), confirm not idempotent without ID column, huella depends on live
   enrichment, instrument creation race (KeyError), same-day rows ordered by line. All but the race are in L14.
+- **L17** (user, 2026-10-24): "si partelas en PR stackeadas yo mergeo". Backend delivered as stacked PRs in
+  garal-code/garal-screener (repo moved from garal-labs): #40 `f2f60dd` → develop, #41 `b71b2ca`, #42 `d66d223`,
+  #43 `92589f6` (≈1,490 lines: one cohesive flow, ≈720 tests + ≈280 docs), #44 `4f973a6`..this commit, each
+  based on the previous branch `feat/importar-csv-0N-*`. pytest at each tip: 251/287/289/331/339 passed. User merges,
+  in order, with merge commits.
