@@ -28,8 +28,8 @@ Branches: backend `feat/importar-csv` (from `origin/develop`, 9b6ed8d); frontend
 - **D2 Template config** — `delimitador` (`,` `;` `\t` `|` or null = auto), `separador_decimal` (`.` or `,`),
   `formato_fecha` (null = ISO date/datetime, else a `strptime` format such as `%d/%m/%Y`), `columnas`
   {`fecha`, `isin`, `tipo`, `cantidad`, `precio` required; `comision` list summed; `tipo_cambio`,
-  `moneda_precio`, `referencia` optional}, `valores_compra` / `valores_venta` (non-empty, disjoint,
-  case-insensitive exact match), `invertir_tipo_cambio` (bool).
+  `moneda_precio`, `referencia` optional}, `valores_compra` / `valores_venta` (at least one
+  of the two non-empty, disjoint, case-insensitive exact match; see L15), `invertir_tipo_cambio` (bool).
 - **D3 Normalization** — Numbers use the template decimal separator, the other separator is a thousands
   separator, and the absolute value is taken (the type comes from the type column, so the sign is not used).
   Commission = sum of the mapped columns (empty = 0). `tipo_cambio` follows `calculos.py:153` (currency units
@@ -129,3 +129,6 @@ Branches: backend `feat/importar-csv` (from `origin/develop`, 9b6ed8d); frontend
   enrichment name between preview and confirm; FIFO re-simulated per sale (5,000 rows over a 10,000-movement
   cartera ≈ 21 s); same-day rows ordered by line, not time; "posición disponible" shows the position after all
   stored movements, not at the sale date; IntegrityError 409 not logged.
+- **L15** (user, 2026-10-24): "En el back (lo que te recomiendo): que exija al menos un valor de compra o de
+  venta, no uno de cada. Es lo correcto y además desbloquea los CSV que solo tienen ventas." Done inline: both
+  lists default to `[]`; both empty → 422 "Debe haber al menos un valor de compra o de venta".

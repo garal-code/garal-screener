@@ -127,8 +127,38 @@ class TestPlantillasImportacion:
         assert r.status_code == 422
         assert auth_client.get(PLANTILLAS).json() == []
 
-    def test_valores_compra_vacios_retorna_422(self, auth_client):
+    def test_solo_valores_de_venta_se_guarda(self, auth_client):
         r = crear_plantilla(auth_client, config=config_t212(valores_compra=[]))
+        assert r.status_code == 200
+        assert r.json()["config"]["valores_compra"] == []
+        assert r.json()["config"]["valores_venta"] == ["Market sell", "Limit sell"]
+
+    def test_solo_valores_de_compra_se_guarda(self, auth_client):
+        config = config_t212()
+        del config["valores_venta"]
+        r = crear_plantilla(auth_client, config=config)
+        assert r.status_code == 200
+        assert r.json()["config"]["valores_compra"] == ["Market buy", "Limit buy"]
+        assert r.json()["config"]["valores_venta"] == []
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [{"valores_compra": [], "valores_venta": []}, {}],
+        ids=["listas_vacias", "sin_listas"],
+    )
+    def test_sin_valores_de_compra_ni_de_venta_retorna_422(
+        self, auth_client, overrides
+    ):
+        config = config_t212()
+        del config["valores_compra"], config["valores_venta"]
+        config.update(overrides)
+        r = crear_plantilla(auth_client, config=config)
+        assert r.status_code == 422
+        assert "al menos un valor de compra o de venta" in r.text
+        assert auth_client.get(PLANTILLAS).json() == []
+
+    def test_valor_de_compra_vacio_retorna_422(self, auth_client):
+        r = crear_plantilla(auth_client, config=config_t212(valores_compra=["  "]))
         assert r.status_code == 422
         assert auth_client.get(PLANTILLAS).json() == []
 
@@ -806,6 +836,36 @@ class TestConfirmar:
         r = confirmar(auth_client, cid, ventas, pid, p.json()["huella"])
         assert r.json() == {"importados": 1, "omitidos": 1}
         assert len(movimientos(auth_client, cid)) == 2
+
+    def test_plantilla_solo_de_ventas(self, auth_client, enriquecer):
+        cid, pid = escenario(auth_client)
+        compra = csv_t212(
+            fila_csv("Market buy", "2025-02-01", US, "B1", "3", "10", "USD")
+        )
+        confirmar(
+            auth_client,
+            cid,
+            compra,
+            pid,
+            previsualizar(auth_client, cid, compra, pid).json()["huella"],
+        )
+        solo_ventas = crear_plantilla(
+            auth_client, nombre="Solo ventas", config=config_t212(valores_compra=[])
+        ).json()["id"]
+
+        csv = csv_t212(
+            fila_csv("Market buy", "2025-03-01", US, "B2", "1", "11", "USD"),
+            fila_csv("Market sell", "2025-03-02", US, "S1", "2", "12", "USD"),
+        )
+        p = previsualizar(auth_client, cid, csv, solo_ventas)
+        assert estados(p) == {2: "omitir", 3: "importar"}
+        assert motivos(p)[2] == 'Tipo "Market buy" no es compra ni venta'
+        r = confirmar(auth_client, cid, csv, solo_ventas, p.json()["huella"])
+        assert r.json() == {"importados": 1, "omitidos": 1}
+        assert sorted(m["tipo"] for m in movimientos(auth_client, cid)) == [
+            "compra",
+            "venta",
+        ]
 
     def test_huella_distinta_retorna_409_y_no_escribe(self, auth_client, enriquecer):
         cid, pid, huella = self._importar_mixto(auth_client)

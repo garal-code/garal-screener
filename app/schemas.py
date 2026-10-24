@@ -156,9 +156,10 @@ class PlantillaConfig(BaseModel):
     # None = ISO date or datetime (2025-02-04, 2025-02-04 08:00:01, ...T13:46:07Z)
     formato_fecha: TextoNoVacio | None = None
     columnas: ColumnasImportacion
-    # Case-insensitive exact values of the type column; any other value is skipped
-    valores_compra: list[TextoNoVacio] = Field(min_length=1)
-    valores_venta: list[TextoNoVacio] = Field(min_length=1)
+    # Case-insensitive exact values of the type column; any other value is skipped.
+    # At least one of the two lists must be non-empty (e.g. a sales-only export).
+    valores_compra: list[TextoNoVacio] = Field(default_factory=list)
+    valores_venta: list[TextoNoVacio] = Field(default_factory=list)
     # True when the broker quotes EUR per currency unit instead of units per EUR
     invertir_tipo_cambio: bool = False
 
@@ -173,6 +174,8 @@ class PlantillaConfig(BaseModel):
 
     @model_validator(mode="after")
     def _coherente(self) -> "PlantillaConfig":
+        if not self.valores_compra and not self.valores_venta:
+            raise ValueError("Debe haber al menos un valor de compra o de venta")
         compra = {v.casefold() for v in self.valores_compra}
         comunes = sorted(v for v in self.valores_venta if v.casefold() in compra)
         if comunes:

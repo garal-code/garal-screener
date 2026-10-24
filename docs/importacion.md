@@ -46,11 +46,11 @@ Una plantilla ajena o inexistente responde `404` con `"Plantilla no encontrada"`
 | `separador_decimal` | `"."` o `","` | `"."` | El otro símbolo se trata como separador de miles |
 | `formato_fecha` | formato `strptime` (p. ej. `%d/%m/%Y`) o `null` | `null` | `null` = fecha o fecha-hora ISO (`2025-02-04`, `2025-02-04 08:00:01`, `2026-01-14T13:46:07.018Z`) |
 | `columnas` | ver abajo | — | Cabecera del CSV que alimenta cada campo |
-| `valores_compra` | lista no vacía | — | Valores de la columna `tipo` que son compras |
-| `valores_venta` | lista no vacía | — | Valores de la columna `tipo` que son ventas |
+| `valores_compra` | lista | `[]` | Valores de la columna `tipo` que son compras |
+| `valores_venta` | lista | `[]` | Valores de la columna `tipo` que son ventas |
 | `invertir_tipo_cambio` | `true` / `false` | `false` | `true` si el broker da EUR por unidad de moneda en lugar de unidades de moneda por EUR |
 
-`valores_compra` y `valores_venta` se comparan sin distinguir mayúsculas, con coincidencia exacta, y no pueden compartir valores. El delimitador no puede ser igual al separador decimal.
+`valores_compra` y `valores_venta` se comparan sin distinguir mayúsculas, con coincidencia exacta, y no pueden compartir valores. Al menos una de las dos listas debe tener valores, así que una plantilla puede ser solo de compras o solo de ventas (por ejemplo, un CSV que solo exporta ventas); si las dos están vacías la respuesta es 422 "Debe haber al menos un valor de compra o de venta". El delimitador no puede ser igual al separador decimal.
 
 `columnas`:
 
