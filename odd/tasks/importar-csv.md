@@ -132,3 +132,9 @@ Branches: backend `feat/importar-csv` (from `origin/develop`, 9b6ed8d); frontend
 - **L15** (user, 2026-10-24): "En el back (lo que te recomiendo): que exija al menos un valor de compra o de
   venta, no uno de cada. Es lo correcto y además desbloquea los CSV que solo tienen ventas." Done inline: both
   lists default to `[]`; both empty → 422 "Debe haber al menos un valor de compra o de venta".
+  Commit `70ea203`, full suite 339 passed.
+- **L16** (evidence): native review `review-b3503c209af9d032` (risk, reliability) of origin/develop..70ea203
+  approved and acknowledged; 7 non-blocking advisories, none on the L15 change: R1-001 / R3-sync-work-in-async
+  (`importaciones.py:220-227`, preview/confirm CPU work blocks the event loop), R1-002 (`importaciones.py:179-181`,
+  ISIN enrichment per unknown ISIN), confirm not idempotent without ID column, huella depends on live
+  enrichment, instrument creation race (KeyError), same-day rows ordered by line. All but the race are in L14.
