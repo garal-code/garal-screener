@@ -12,7 +12,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import cast
 
 from app.models import Movimiento
@@ -32,7 +32,11 @@ ID_BASE_SIMULADO = 10**12
 
 ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
 # Date part of an ISO date or datetime: 2025-02-04, 2025-02-04 08:00:01, ...T13:46Z
-FECHA_ISO_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:[T ].*)?$")
+FECHA_ISO_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:[T ](.*))?$")
+# Time at the start of what follows the date: 08:00, 08:00:01, 13:46:07.018Z
+HORA_ISO_RE = re.compile(r"^(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?")
+# strptime directives that carry a time of day
+DIRECTIVAS_HORA = frozenset("HIMSfXc")
 # Thousands groups are optional but, when present, must be complete. This
 # rejects "1.234,56" in a dot-decimal template instead of reading 1.23456.
 NUMERO_RE = {
@@ -64,6 +68,9 @@ class FilaNormalizada:
     linea: int
     tipo: str  # compra | venta
     fecha: date
+    # Time as written (no timezone conversion), only used to order the rows of a
+    # day; None when the CSV has no time
+    hora: time | None
     isin: str
     cantidad: float
     precio: float  # price column as is (currency of the price column)
@@ -210,14 +217,39 @@ def _isin(valor: str) -> str:
     return isin
 
 
-def _fecha(valor: str, formato: str | None) -> date:
+def _hora_iso(resto: str | None) -> time | None:
+    """Time of day at the start of the text after an ISO date; None if unreadable."""
+    m = HORA_ISO_RE.match(resto or "")
+    if not m:
+        return None
+    horas, minutos, segundos, fraccion = m.groups()
+    try:
+        return time(
+            int(horas),
+            int(minutos),
+            int(segundos or 0),
+            int((fraccion or "0")[:6].ljust(6, "0")),
+        )
+    except ValueError:
+        return None
+
+
+def _formato_con_hora(formato: str) -> bool:
+    # findall consumes "%%" first, so an escaped percent is not a directive
+    return any(d in DIRECTIVAS_HORA for d in re.findall(r"%(.)", formato))
+
+
+def _fecha(valor: str, formato: str | None) -> tuple[date, time | None]:
+    """Date part and, when the cell has one, the time as written."""
     try:
         if formato is None:
             m = FECHA_ISO_RE.match(valor)
             if m:
-                return date.fromisoformat(m.group(1))
+                return date.fromisoformat(m.group(1)), _hora_iso(m.group(2))
         else:
-            return datetime.strptime(valor, formato).date()
+            momento = datetime.strptime(valor, formato)
+            hora = momento.time() if _formato_con_hora(formato) else None
+            return momento.date(), hora
     except ValueError:
         pass
     raise _OmitirError(f'Fecha "{valor}" no válida')
@@ -289,11 +321,15 @@ def normalizar_fila(
     v = fila.valores
     sep = config.separador_decimal
     try:
+        tipo = _tipo(v[c.tipo], config)
+        isin = _isin(v[c.isin])
+        fecha, hora = _fecha(v[c.fecha], config.formato_fecha)
         return FilaNormalizada(
             linea=fila.linea,
-            tipo=_tipo(v[c.tipo], config),
-            isin=_isin(v[c.isin]),
-            fecha=_fecha(v[c.fecha], config.formato_fecha),
+            tipo=tipo,
+            isin=isin,
+            fecha=fecha,
+            hora=hora,
             cantidad=_positivo(
                 v[c.cantidad], sep, f'Cantidad "{v[c.cantidad]}" no válida'
             ),
@@ -333,6 +369,9 @@ class FilaPlan:
 @dataclass(frozen=True)
 class Plan:
     filas: list[FilaPlan]  # ordered by linea
+    # Rows to import in processing order, (fecha, hora, linea): the order in
+    # which they must be stored so ids follow the time within a day
+    importables: list[FilaNormalizada]
     # Metadata of the ISINs that were not in the database, fetched once each
     enriquecidos: dict[str, dict]
 
@@ -418,6 +457,11 @@ def _comprobar_venta(fila: FilaNormalizada, movimientos: list) -> str | None:
     return None
 
 
+def _orden_de_proceso(fila: FilaNormalizada) -> tuple:
+    """Same day: rows with time first, by time; rows without time after; then line."""
+    return (fila.fecha, fila.hora is None, fila.hora or time.min, fila.linea)
+
+
 async def planificar(
     resultados: list[FilaNormalizada | FilaOmitida],
     referencias_existentes: set[str],
@@ -438,8 +482,10 @@ async def planificar(
             Called at most once per ISIN; an exception counts as not found.
 
     Duplicate IDs are decided by file line: the first line with an ID wins.
-    Then rows are processed by (fecha, linea): a sale is checked against the
-    FIFO position of the stored movements plus the rows accepted before it.
+    Then rows are processed by (fecha, hora, linea): within a day the rows with
+    a time go first, by time, then the rows without one; ties go by line. A
+    sale is checked against the FIFO position of the stored movements plus the
+    rows accepted before it. `Plan.importables` keeps that order for insertion.
     """
     planes: dict[int, FilaPlan] = {}
     normalizadas: list[FilaNormalizada] = []
@@ -459,7 +505,8 @@ async def planificar(
         for fila in sorted(normalizadas, key=lambda f: f.linea)
     }
 
-    for fila in sorted(normalizadas, key=lambda f: (f.fecha, f.linea)):
+    importables: list[FilaNormalizada] = []
+    for fila in sorted(normalizadas, key=_orden_de_proceso):
         nombre = nombres_conocidos.get(fila.isin)
         motivo = motivos_referencia[fila.linea]
 
@@ -475,6 +522,7 @@ async def planificar(
             motivo = _comprobar_venta(fila, movs)
 
         if motivo is None:
+            importables.append(fila)
             historial.setdefault(fila.isin, []).append(
                 _MovimientoSimulado(
                     id=ID_BASE_SIMULADO + len(historial[fila.isin]),
@@ -494,5 +542,6 @@ async def planificar(
 
     return Plan(
         filas=[planes[linea] for linea in sorted(planes)],
+        importables=importables,
         enriquecidos={isin: d for isin, d in enriquecidos.items() if d},
     )

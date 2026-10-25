@@ -1084,3 +1084,194 @@ class TestConfirmarAtomico:
         )
         assert len(movimientos(auth_client, cid)) == 1
         assert [i["isin"] for i in instrumentos(auth_client)] == [ES]
+
+
+class TestOrdenPorHoraDentroDelDia:
+    """S9: rows of the same day are processed and inserted by (hora, línea)."""
+
+    def _venta_antes_de_su_compra(self):
+        # T212-shaped: the sale is line 2 at 10:00, the buy that covers it is line 3 at 09:00
+        return csv_t212(
+            fila_csv("Market sell", "2025-03-10 10:00:00", ES, "S1", "4", "12"),
+            fila_csv("Market buy", "2025-03-10 09:00:00", ES, "B1", "10", "11"),
+        )
+
+    def test_la_venta_la_cubre_la_compra_anterior_en_hora(
+        self, auth_client, enriquecer
+    ):
+        cid, pid = escenario(auth_client)
+        r = previsualizar(auth_client, cid, self._venta_antes_de_su_compra(), pid)
+
+        assert r.status_code == 200
+        assert estados(r) == {2: "importar", 3: "importar"}
+        assert motivos(r) == {2: None, 3: None}
+        assert r.json()["resumen"] == {"total": 2, "importar": 2, "omitir": 0}
+        # the preview keeps the date as written and stays sorted by line
+        assert [(f["linea"], f["fecha"]) for f in r.json()["filas"]] == [
+            (2, "2025-03-10"),
+            (3, "2025-03-10"),
+        ]
+
+    def test_la_venta_antes_de_la_compra_en_hora_se_omite(
+        self, auth_client, enriquecer
+    ):
+        cid, pid = escenario(auth_client)
+        contenido = csv_t212(
+            fila_csv("Market buy", "2025-03-10 10:00:00", ES, "B1", "10", "11"),
+            fila_csv("Market sell", "2025-03-10 09:00:00", ES, "S1", "4", "12"),
+        )
+        r = previsualizar(auth_client, cid, contenido, pid)
+        assert estados(r) == {2: "importar", 3: "omitir"}
+        assert motivos(r)[3] == "Venta de 4 supera la posición disponible (0)"
+
+    def test_confirmar_inserta_en_orden_de_hora_y_el_resumen_cuadra(
+        self, auth_client, enriquecer
+    ):
+        contenido = self._venta_antes_de_su_compra()
+        cid, pid = escenario(auth_client)
+        preview = previsualizar(auth_client, cid, contenido, pid)
+        r = confirmar(auth_client, cid, contenido, pid, preview.json()["huella"])
+        assert r.status_code == 200
+        assert r.json() == {"importados": 2, "omitidos": 0}
+
+        # autoincrement ids follow the time: the 09:00 buy is stored first
+        guardados = sorted(movimientos(auth_client, cid), key=lambda m: m["id"])
+        assert [(m["tipo"], m["fecha"], m["cantidad"]) for m in guardados] == [
+            ("compra", "2025-03-10", 10.0),
+            ("venta", "2025-03-10", 4.0),
+        ]
+
+        # the FIFO over the stored data agrees with the preview
+        with mock_precios(fx_rates={"USD": 1.0}):
+            resumen = auth_client.get(f"{BASE}/carteras/{cid}/resumen")
+        assert resumen.status_code == 200
+        assert resumen.json()["num_posiciones"] == 1
+        assert resumen.json()["posiciones"][0]["cantidad_actual"] == pytest.approx(6.0)
+
+    def test_confirmar_la_posicion_cerrada_no_rompe_el_resumen(
+        self, auth_client, enriquecer
+    ):
+        contenido = csv_t212(
+            fila_csv("Market sell", "2025-03-10 10:00:00", ES, "S1", "10", "12"),
+            fila_csv("Market buy", "2025-03-10 09:00:00", ES, "B1", "10", "11"),
+        )
+        cid, pid = escenario(auth_client)
+        preview = previsualizar(auth_client, cid, contenido, pid)
+        confirmar(auth_client, cid, contenido, pid, preview.json()["huella"])
+
+        with mock_precios(fx_rates={"USD": 1.0}):
+            resumen = auth_client.get(f"{BASE}/carteras/{cid}/resumen")
+        assert resumen.status_code == 200
+        assert resumen.json()["num_posiciones"] == 0
+
+    def test_formato_fecha_explicito_con_hora_ordena_por_hora(
+        self, auth_client, enriquecer
+    ):
+        config = config_t212(formato_fecha="%d/%m/%Y %H:%M")
+        cid, pid = escenario(auth_client, config)
+        contenido = csv_t212(
+            fila_csv("Market sell", "10/03/2025 10:00", ES, "S1", "4", "12"),
+            fila_csv("Market buy", "10/03/2025 09:00", ES, "B1", "10", "11"),
+        )
+        preview = previsualizar(auth_client, cid, contenido, pid)
+        assert estados(preview) == {2: "importar", 3: "importar"}
+        assert preview.json()["filas"][0]["fecha"] == "2025-03-10"
+
+        r = confirmar(auth_client, cid, contenido, pid, preview.json()["huella"])
+        assert r.json() == {"importados": 2, "omitidos": 0}
+        guardados = sorted(movimientos(auth_client, cid), key=lambda m: m["id"])
+        assert [m["tipo"] for m in guardados] == ["compra", "venta"]
+
+    def test_iso_con_t_y_zona_ordena_por_la_hora_escrita(self, auth_client, enriquecer):
+        cid, pid = escenario(auth_client)
+        contenido = csv_t212(
+            fila_csv("Market sell", "2026-01-14T13:46:07.018Z", ES, "S1", "4", "12"),
+            fila_csv("Market buy", "2026-01-14T13:46:06.500Z", ES, "B1", "10", "11"),
+        )
+        r = previsualizar(auth_client, cid, contenido, pid)
+        assert estados(r) == {2: "importar", 3: "importar"}
+
+    def test_filas_sin_hora_van_despues_de_las_que_la_tienen(
+        self, auth_client, enriquecer
+    ):
+        cid, pid = escenario(auth_client)
+        contenido = csv_t212(
+            # the buy has no time, so it is processed after the timed sale
+            fila_csv("Market buy", "2025-03-10", ES, "B1", "10", "11"),
+            fila_csv("Market sell", "2025-03-10 09:00:00", ES, "S1", "4", "12"),
+        )
+        r = previsualizar(auth_client, cid, contenido, pid)
+        assert estados(r) == {2: "importar", 3: "omitir"}
+        assert motivos(r)[3] == "Venta de 4 supera la posición disponible (0)"
+
+    def test_misma_hora_se_ordena_por_linea(self, auth_client, enriquecer):
+        cid, pid = escenario(auth_client)
+        contenido = csv_t212(
+            fila_csv("Market sell", "2025-03-10 09:00:00", ES, "S1", "4", "12"),
+            fila_csv("Market buy", "2025-03-10 09:00:00", ES, "B1", "10", "11"),
+        )
+        r = previsualizar(auth_client, cid, contenido, pid)
+        assert estados(r) == {2: "omitir", 3: "importar"}
+
+    def test_sin_hora_las_filas_del_mismo_dia_mantienen_el_orden_de_linea(
+        self, auth_client, enriquecer
+    ):
+        cid, pid = escenario(auth_client)
+        contenido = csv_t212(
+            fila_csv("Market sell", "2025-03-10", ES, "S1", "4", "12"),
+            fila_csv("Market buy", "2025-03-10", ES, "B1", "10", "11"),
+        )
+        r = previsualizar(auth_client, cid, contenido, pid)
+        assert estados(r) == {2: "omitir", 3: "importar"}
+        assert motivos(r)[2] == "Venta de 4 supera la posición disponible (0)"
+
+    def test_las_filas_importadas_van_despues_de_los_movimientos_del_dia(
+        self, auth_client, enriquecer
+    ):
+        cid, pid = escenario(auth_client)
+        compra = csv_t212(fila_csv("Market buy", "2025-03-10", ES, "B1", "10", "11"))
+        confirmar(
+            auth_client,
+            cid,
+            compra,
+            pid,
+            previsualizar(auth_client, cid, compra, pid).json()["huella"],
+        )
+
+        # earlier time than any stored data, same day: still after the stored buy
+        venta = csv_t212(
+            fila_csv("Market sell", "2025-03-10 00:00:01", ES, "S1", "4", "12")
+        )
+        p = previsualizar(auth_client, cid, venta, pid)
+        assert estados(p) == {2: "importar"}
+        confirmar(auth_client, cid, venta, pid, p.json()["huella"])
+
+        guardados = sorted(movimientos(auth_client, cid), key=lambda m: m["id"])
+        assert [m["tipo"] for m in guardados] == ["compra", "venta"]
+        with mock_precios(fx_rates={"USD": 1.0}):
+            resumen = auth_client.get(f"{BASE}/carteras/{cid}/resumen")
+        assert resumen.status_code == 200
+        assert resumen.json()["posiciones"][0]["cantidad_actual"] == pytest.approx(6.0)
+
+    def test_duplicados_se_deciden_por_linea_aunque_la_hora_sea_anterior(
+        self, auth_client, enriquecer
+    ):
+        cid, pid = escenario(auth_client)
+        contenido = csv_t212(
+            fila_csv("Market buy", "2025-03-10 10:00:00", ES, "B1", "1", "10"),
+            fila_csv("Market buy", "2025-03-10 09:00:00", ES, "B1", "2", "10"),
+        )
+        r = previsualizar(auth_client, cid, contenido, pid)
+        assert motivos(r) == {2: None, 3: "Duplicada en el archivo (ID B1)"}
+        confirm = confirmar(auth_client, cid, contenido, pid, r.json()["huella"])
+        assert confirm.json() == {"importados": 1, "omitidos": 1}
+        assert [m["cantidad"] for m in movimientos(auth_client, cid)] == [1.0]
+
+    def test_la_huella_no_cambia_con_la_hora_ni_el_orden_de_proceso(
+        self, auth_client, enriquecer
+    ):
+        cid, pid = escenario(auth_client)
+        r = previsualizar(auth_client, cid, self._venta_antes_de_su_compra(), pid)
+        canonico = json.dumps(r.json()["filas"], sort_keys=True, separators=(",", ":"))
+        assert r.json()["huella"] == hashlib.sha256(canonico.encode()).hexdigest()
+        assert [f["linea"] for f in r.json()["filas"]] == [2, 3]

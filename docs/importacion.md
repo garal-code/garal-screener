@@ -74,7 +74,7 @@ Cada fila de datos se convierte en un movimiento o se omite con un motivo. Se ev
 
 1. **Tipo.** Si no está en `valores_compra` ni `valores_venta` (depósitos, dividendos, intereses...), se omite. Se comprueba primero para que una fila sin ISIN que no es compra ni venta se explique como "no es compra ni venta".
 2. **ISIN.** Obligatorio (el sistema funciona por ISIN). Se pasa a mayúsculas y debe tener formato ISIN (2 letras, 9 alfanuméricos, 1 dígito).
-3. **Fecha.** Con `formato_fecha`, o ISO si es `null`. Solo se conserva la fecha, sin hora.
+3. **Fecha.** Con `formato_fecha`, o ISO si es `null`. La `fecha` del movimiento es solo la fecha tal cual está escrita. Si la celda trae hora (ISO como `2025-02-04 08:00:01` o `2026-01-14T13:46:07.018Z`, o un `formato_fecha` con directivas de hora como `%d/%m/%Y %H:%M`), se usa solo para ordenar las filas del mismo día, tal cual está escrita y sin conversión de zona horaria; no se guarda ni se muestra.
 4. **Cantidad y precio.** Números positivos. Con `separador_decimal` `"."`, la coma es separador de miles; con `","`, el punto lo es. Los grupos de miles deben estar completos: `1.234,56` en una plantilla de punto decimal se rechaza en vez de leerse como `1.23456`. Se toma el **valor absoluto** (el tipo sale de la columna `tipo`, no del signo).
 5. **Comisión.** Suma de las columnas de `comision` (vacía = 0), en valor absoluto. Se guarda en EUR, como en los movimientos manuales.
 6. **Tipo de cambio** (unidades de moneda por 1 EUR, igual que en los movimientos manuales):
@@ -146,7 +146,7 @@ Cuerpo: `{"contenido": str, "plantilla_id": int}`. No escribe nada: ni instrumen
 - `estado` es `importar` u `omitir`; `motivo` es `null` salvo en las omitidas.
 - Una fila omitida **al leerla** (tipo, ISIN, fecha, cantidad, precio, comisión o tipo de cambio no válidos) tiene todos los campos de datos a `null`. Una fila omitida **después** (duplicada, ya importada, ISIN sin datos, venta excesiva) conserva sus campos normalizados.
 - `nombre` es el del instrumento si ya existe en la base de datos; si no, el que devuelve el enriquecimiento por ISIN.
-- Las filas se procesan ordenadas por (`fecha`, `linea`), no por su posición en el archivo. Esto importa para duplicados y ventas.
+- Las filas se procesan ordenadas por (`fecha`, `hora`, `linea`), no por su posición en el archivo: en un mismo día van primero las filas con hora, por hora, después las filas sin hora, y los empates se resuelven por línea. Esto importa para las ventas. La respuesta no cambia: `filas` sigue ordenada por `linea` y `fecha` es solo la fecha.
 - Los ISIN que no están en la base de datos se enriquecen (`precios.enriquecer_por_isin`) **una sola vez por ISIN y petición**, y solo si alguna fila llega a esa comprobación. Una respuesta vacía o una excepción omite la fila.
 - `huella` es el SHA-256 hexadecimal del JSON canónico de `filas`: la lista tal cual se devuelve, con claves ordenadas, separadores `,` y `:` sin espacios, fechas en ISO y escapes ASCII (`json.dumps(filas, sort_keys=True, separators=(",", ":"))`).
 
@@ -160,7 +160,7 @@ Cuerpo: `{"contenido": str, "plantilla_id": int, "huella": str}`, con la `huella
 {"importados": 3, "omitidos": 3}
 ```
 
-El servidor recalcula el plan. Si la `huella` recalculada difiere (porque cambió el archivo, la plantilla o los datos de la cartera), responde `409` con `"La previsualización ya no coincide con los datos actuales. Vuelve a previsualizar."` y no escribe nada. Si coincide, inserta en **una sola transacción** los instrumentos nuevos (solo los de filas que se importan) y un movimiento por cada fila `importar`, con `referencia_externa` = `referencia`, `notas` vacías, y la comisión y el tipo de cambio normalizados. Cualquier fallo revierte todo. Si otra petición ocupa mientras tanto un ISIN o un ID de broker (violación de unicidad), también responde `409` con el mismo mensaje.
+El servidor recalcula el plan. Si la `huella` recalculada difiere (porque cambió el archivo, la plantilla o los datos de la cartera), responde `409` con `"La previsualización ya no coincide con los datos actuales. Vuelve a previsualizar."` y no escribe nada. Si coincide, inserta en **una sola transacción** los instrumentos nuevos (solo los de filas que se importan) y un movimiento por cada fila `importar`, en el mismo orden de proceso (`fecha`, `hora`, `linea`) para que los `id` autoincrementales sigan la hora real y el historial ordenado por (`fecha`, `id`) coincida con la previsualización (los movimientos importados van después de los ya guardados del mismo día), con `referencia_externa` = `referencia`, `notas` vacías, y la comisión y el tipo de cambio normalizados. Cualquier fallo revierte todo. Si otra petición ocupa mientras tanto un ISIN o un ID de broker (violación de unicidad), también responde `409` con el mismo mensaje.
 
 Confirmar un archivo sin filas `importar` es válido: responde `{"importados": 0, "omitidos": n}`.
 
@@ -186,7 +186,7 @@ Textos exactos de `motivo` (en español, como el resto de la API).
 
 ### Al planificar (filas ya normalizadas)
 
-Los duplicados se deciden por línea del archivo: gana la primera línea con cada `referencia`. El resto se comprueba en este orden, procesando por (`fecha`, `linea`):
+Los duplicados se deciden por línea del archivo: gana la primera línea con cada `referencia`. El resto se comprueba en este orden, procesando por (`fecha`, `hora`, `linea`):
 
 | Motivo | Causa |
 |---|---|

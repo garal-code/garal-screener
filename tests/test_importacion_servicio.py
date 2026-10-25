@@ -5,7 +5,7 @@ Fixtures are synthetic: they mimic the column layout of Trading212 and Trade
 Republic exports plus a generic European-style CSV, with made-up values.
 """
 
-from datetime import date
+from datetime import date, time
 
 import pytest
 
@@ -227,6 +227,7 @@ class TestNormalizarTrading212:
             linea=3,
             tipo="compra",
             fecha=date(2025, 2, 4),
+            hora=time(8, 0, 1),
             isin="ES0000000001",
             cantidad=75.123456,
             precio=13.4,
@@ -238,6 +239,7 @@ class TestNormalizarTrading212:
             linea=4,
             tipo="venta",
             fecha=date(2025, 6, 11),
+            hora=time(17, 7, 48),
             isin="US0000000002",
             cantidad=21.654321,
             precio=15.22,
@@ -255,6 +257,7 @@ class TestNormalizarTradeRepublic:
             linea=2,
             tipo="compra",
             fecha=date(2026, 1, 14),
+            hora=time(13, 46, 7, 18000),
             isin="JP0000000003",
             cantidad=15.0,
             precio=31.2,
@@ -282,6 +285,7 @@ class TestNormalizarGenerico:
             linea=2,
             tipo="compra",
             fecha=date(2025, 2, 4),
+            hora=None,
             isin="ES0000000005",
             cantidad=1200.0,
             precio=1234.56,
@@ -350,3 +354,62 @@ class TestMotivosDeOmision:
         contenido = T212_CSV.replace("USD,1.08765432,", "USD,,")
         _, _, venta, _ = normalizar_todo(contenido, T212_CONFIG)
         assert venta.tipo_cambio is None
+
+
+class TestHora:
+    """S9: the time is kept only for ordering; `fecha` stays the date as written."""
+
+    CABECERA = "Fecha,Operación,ISIN,Títulos,Precio\n"
+
+    def _fila(self, fecha, formato=None):
+        config = PlantillaConfig.model_validate(
+            {
+                "formato_fecha": formato,
+                "columnas": {
+                    "fecha": "Fecha",
+                    "isin": "ISIN",
+                    "tipo": "Operación",
+                    "cantidad": "Títulos",
+                    "precio": "Precio",
+                },
+                "valores_compra": ["Compra"],
+            }
+        )
+        contenido = f"{self.CABECERA}{fecha},Compra,ES0000000001,1,10\n"
+        (resultado,) = normalizar_todo(contenido, config)
+        return resultado
+
+    @pytest.mark.parametrize(
+        ("valor", "hora"),
+        [
+            ("2025-02-04", None),
+            ("2025-02-04 08:00:01", time(8, 0, 1)),
+            ("2025-02-04T08:00", time(8, 0)),
+            ("2026-01-14T13:46:07.018Z", time(13, 46, 7, 18000)),
+            ("2026-01-14T13:46:07+02:00", time(13, 46, 7)),
+        ],
+    )
+    def test_hora_iso_tal_como_esta_escrita(self, valor, hora):
+        resultado = self._fila(valor)
+        assert resultado.fecha == date.fromisoformat(valor[:10])
+        assert resultado.hora == hora
+
+    @pytest.mark.parametrize(
+        ("valor", "formato", "hora"),
+        [
+            ("04/02/2025 08:05", "%d/%m/%Y %H:%M", time(8, 5)),
+            ("04/02/2025 08:05:09", "%d/%m/%Y %H:%M:%S", time(8, 5, 9)),
+            ("04/02/2025 08:05 PM", "%d/%m/%Y %I:%M %p", time(20, 5)),
+            ("04/02/2025", "%d/%m/%Y", None),
+            ("00:00 04/02/2025", "%H:%M %d/%m/%Y", time(0, 0)),
+        ],
+    )
+    def test_hora_con_formato_explicito(self, valor, formato, hora):
+        resultado = self._fila(valor, formato)
+        assert resultado.fecha == date(2025, 2, 4)
+        assert resultado.hora == hora
+
+    def test_fecha_invalida_sigue_omitiendose(self):
+        assert self._fila("2025-13-40 08:00") == FilaOmitida(
+            linea=2, motivo='Fecha "2025-13-40 08:00" no válida'
+        )
