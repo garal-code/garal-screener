@@ -19,6 +19,14 @@ Branches: backend `feat/importar-csv` (from `origin/develop`, 9b6ed8d); frontend
   column, the ID is stored on the movement, and rows already imported are skipped.
 - **S8** — "obviamente esto no lo subas a git": `transaction_templates/` is never committed (excluded via
   `.git/info/exclude`); test fixtures are synthetic and contain no personal data.
+- **S9** — Same-day order by time, light version (L18: "si haz la version liegera"), as proposed: keep the time
+  when the CSV has it ("Al normalizar, guardar la fecha y la hora cuando el CSV la trae"), process rows by
+  "`(fecha, hora, línea)` en lugar de `(fecha, línea)`", and "Al confirmar, insertar las filas **en ese mismo
+  orden**" so autoincrement ids follow the real time. "Sin migración, sin cambiar la API y sin tocar
+  `calculos.py`." Details: the stored `fecha` and the preview `fecha` stay the date as written; the time is used
+  only for ordering, as written (no timezone conversion); a row without time sorts after the rows with time of
+  the same day, then by line; duplicates are still decided by file line; imported rows still sort after the
+  stored movements of the same day; preview response shape and `huella` formula unchanged.
 
 ## Design
 
@@ -61,7 +69,7 @@ Branches: backend `feat/importar-csv` (from `origin/develop`, 9b6ed8d); frontend
   - `POST /carteras/{cartera_id}/importaciones` body `{"contenido", "plantilla_id", "huella"}` → 200
     `{"importados": int, "omitidos": int}`. Recomputed `huella` differs → 409 "La previsualización ya no coincide
     con los datos actuales. Vuelve a previsualizar." and nothing written. Same 400/404 as preview.
-  - Reasons added after normalization, rows processed by (`fecha`, `linea`): "Duplicada en el archivo (ID X)"
+  - Reasons added after normalization, rows processed by (`fecha`, `hora`, `linea`), see S9: "Duplicada en el archivo (ID X)"
     (an earlier line has the same `referencia`), "Ya importada (ID X)" (`referencia_externa` already in the
     cartera), "No se encontraron datos para el ISIN X" (not in `instrumentos` and enrichment fails),
     "Venta de N supera la posición disponible (M)" (FIFO position from existing cartera movements plus accepted
@@ -78,6 +86,9 @@ Branches: backend `feat/importar-csv` (from `origin/develop`, 9b6ed8d); frontend
   `gentle-ai-worker` (context backstop) · commit `92589f6` (full suite 331 passed)
 - [ ] T4 — S2, S4 · Frontend types, API client, import page (upload, mapping editor, save template, preview,
   confirm), sidebar link + tests · inline · commit: pending (UI repo)
+- [x] T6 — S9 · Backend: order import rows by time within a day, insert in that order + tests + docs ·
+  `gentle-ai-worker` (context backstop) · branch `feat/importar-csv-06-orden-hora` · commit: the commit that
+  adds L20 (`fix(importacion): order same-day import rows by time`; full suite 362 passed)
 - [ ] T5 — S1-S8 · Independent verification (high-risk item 1: migration and bulk data writes) ·
   `gentle-ai-verify` · verdict: pending
 
@@ -143,3 +154,20 @@ Branches: backend `feat/importar-csv` (from `origin/develop`, 9b6ed8d); frontend
   #43 `92589f6` (≈1,490 lines: one cohesive flow, ≈720 tests + ≈280 docs), #44 `4f973a6`..this commit, each
   based on the previous branch `feat/importar-csv-0N-*`. pytest at each tip: 251/287/289/331/339 passed. User merges,
   in order, with merge commits.
+- **L18** (user, 2026-10-25): "y si en vez de eso no solamente cogemos la fecha sino tambien la hora?" After the
+  proposal (not storing time in `movimientos`: migration, API contract, manual rows without time), user: "si haz
+  la version liegera" → S9, T6.
+- **L19** (user, 2026-10-25): "si yo estoy tocando el front en otro lado": T4 (frontend) is done by the user
+  elsewhere (investment-portfolio-ui branch `prueba/importar-csv-y-moneda`); do not touch it from here.
+- **L20** (evidence, T6 / S9) by `gentle-ai-worker`: RED, 20 failed / 111 passed in `tests/test_importacion.py` +
+  `tests/test_importacion_servicio.py` before any code change (preview: the 10:00 sale on line 2 was `omitir`
+  "Venta de 4 supera la posición disponible (0)" instead of `importar`; unit: no `hora` on `FilaNormalizada`).
+  The preserved behaviors (date-only same-day rows by line, imported rows after stored ones of the same day,
+  duplicate IDs by line, `huella` formula) passed on the old code. After the planner change only the three
+  confirm/resumen tests still failed (ids followed file order), then GREEN after `confirmar_importacion` inserted
+  `plan.importables`: 131 passed in the two files, full suite 362 passed, black/ruff/mypy clean. Differential vs
+  the previous code on 300 random date-only CSVs: preview rows, estados and motivos identical. Not changed:
+  `calculos.py`, models, migrations, schemas, preview response shape, `huella` formula. Decisions S9 does not
+  fix: an ISO cell whose text after the date is not a readable time keeps the old behavior (accepted, no time);
+  `Plan` gets a new field `importables` (rows to import in processing order) and `FilaNormalizada` a new field
+  `hora`.

@@ -251,7 +251,8 @@ async def confirmar_importacion(
     if _huella(_filas_salida(plan)) != data.huella:
         raise HTTPException(status_code=409, detail=HUELLA_OBSOLETA)
 
-    a_importar = [p.fila for p in plan.filas if p.estado == "importar" and p.fila]
+    # Processing order, not file order: autoincrement ids must follow the time
+    a_importar = plan.importables
     try:
         instrumentos: dict[str, models.Instrumento] = {
             i.isin: i
