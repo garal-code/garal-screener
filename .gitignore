@@ -21,6 +21,9 @@ build/
 *.db
 *.sqlite3
 
+# Production database dumps (real user data, never commit)
+production_backups/
+
 # IDE
 .vscode/
 .idea/
