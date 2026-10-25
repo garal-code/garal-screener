@@ -104,12 +104,12 @@ class TestCalcularPosicionFifo:
             calcular_posicion_fifo(movs)
 
     def test_venta_total_con_ruido_de_coma_flotante(self):
-        # 90.485243 - 84.575791 = 5.909452000000002 in float: selling the whole
+        # 10.8 - 10.1 = 0.7000000000000011 in float: selling the whole
         # position must not leave an uncoverable sliver
         movs = [
-            compra(1, D1, 84.575791, 41.383),
-            compra(2, D2, 5.909452, 41.459),
-            venta(3, D3, 90.485243, 41.738),
+            compra(1, D1, 10.1, 40.0),
+            compra(2, D2, 0.7, 41.0),
+            venta(3, D3, 10.8, 42.0),
         ]
         resultado = calcular_posicion_fifo(movs)
         assert resultado["cantidad_actual"] == 0

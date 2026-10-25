@@ -27,9 +27,9 @@ T212_CSV = (
     "Currency (Total),Currency conversion fee,Currency (Currency conversion fee)\n"
     "Deposit,2025-01-02 10:00:00,,,,DEP001,,,,,,,500.00,EUR,,\n"
     "Market buy,2025-02-04 08:00:01,ES0000000001,AAA,Alpha,EOF0001,"
-    "90.8951020000,11.2500000000,EUR,1.00000000,,,1022.57,EUR,,\n"
+    "75.1234560000,13.4000000000,EUR,1.00000000,,,1006.65,EUR,,\n"
     "Market sell,2025-06-11 17:07:48,US0000000002,BBB,Beta,EOF0002,"
-    "19.5432430000,12.7600000000,USD,1.14923167,11.79,EUR,216.66,EUR,0.33,EUR\n"
+    "21.6543210000,15.2200000000,USD,1.08765432,9.99,EUR,302.97,EUR,0.33,EUR\n"
     "Dividend (Ordinary),2025-07-01 09:00:00,US0000000002,BBB,Beta,DIV0001,"
     "19.5,0.10,USD,1.15,,,1.70,EUR,,\n"
 )
@@ -58,13 +58,13 @@ TR_CSV = (
     "price,amount,fee,tax,currency,original_amount,original_currency,fx_rate,"
     "description,transaction_id\n"
     "2026-01-14T13:46:07.018Z,2026-01-14,DEFAULT,TRADING,BUY,STOCK,Gamma,"
-    "JP0000000003,15.0000000000,26.0500000000,-390.75,-1.00,,EUR,,,,"
+    "JP0000000003,15.0000000000,31.2000000000,-468.00,-1.00,,EUR,,,,"
     "Buy trade,tr-0001\n"
     "2026-03-02T18:09:13.245Z,2026-03-02,DEFAULT,TRADING,SELL,FUND,Delta,"
-    "IE0000000004,-90.4852430000,41.7380000000,3776.67,-1.00,,EUR,,,,"
+    "IE0000000004,-64.3210980000,52.1100000000,3351.80,-1.00,,EUR,,,,"
     "Sell trade,tr-0002\n"
     "2026-03-03T08:00:00.000Z,2026-03-03,DEFAULT,TRADING,BUY,FUND,Delta,"
-    "IE0000000004,2.4412350000,43.0110000000,-105.00,,,EUR,,,,"
+    "IE0000000004,3.1415920000,33.4200000000,-105.00,,,EUR,,,,"
     "Savings plan execution,tr-0003\n"
     "2026-04-01T00:00:00.000Z,2026-04-01,DEFAULT,CASH,INTEREST_PAYMENT,,,,,,"
     "9.52,,,EUR,,,,Interest payment,tr-0004\n"
@@ -228,8 +228,8 @@ class TestNormalizarTrading212:
             tipo="compra",
             fecha=date(2025, 2, 4),
             isin="ES0000000001",
-            cantidad=90.895102,
-            precio=11.25,
+            cantidad=75.123456,
+            precio=13.4,
             comision=0.0,
             tipo_cambio=1.0,
             referencia="EOF0001",
@@ -239,10 +239,10 @@ class TestNormalizarTrading212:
             tipo="venta",
             fecha=date(2025, 6, 11),
             isin="US0000000002",
-            cantidad=19.543243,
-            precio=12.76,
+            cantidad=21.654321,
+            precio=15.22,
             comision=0.33,
-            tipo_cambio=1.14923167,
+            tipo_cambio=1.08765432,
             referencia="EOF0002",
         )
 
@@ -257,14 +257,14 @@ class TestNormalizarTradeRepublic:
             fecha=date(2026, 1, 14),
             isin="JP0000000003",
             cantidad=15.0,
-            precio=26.05,
+            precio=31.2,
             comision=1.0,
             tipo_cambio=1.0,
             referencia="tr-0001",
         )
         # Negative shares and fee on sells are taken as absolute values
         assert venta.tipo == "venta"
-        assert venta.cantidad == 90.485243
+        assert venta.cantidad == 64.321098
         assert venta.comision == 1.0
         # Empty fee and tax columns mean no commission
         assert plan.comision == 0.0
@@ -344,9 +344,9 @@ class TestMotivosDeOmision:
 
     def test_moneda_no_eur_conserva_el_tipo_de_cambio_de_la_columna(self):
         _, _, venta, _ = normalizar_todo(T212_CSV, T212_CONFIG)
-        assert venta.tipo_cambio == 1.14923167
+        assert venta.tipo_cambio == 1.08765432
 
     def test_moneda_no_eur_sin_tipo_de_cambio_queda_vacio(self):
-        contenido = T212_CSV.replace("USD,1.14923167,", "USD,,")
+        contenido = T212_CSV.replace("USD,1.08765432,", "USD,,")
         _, _, venta, _ = normalizar_todo(contenido, T212_CONFIG)
         assert venta.tipo_cambio is None

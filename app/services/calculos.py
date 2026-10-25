@@ -17,8 +17,8 @@ class VentaInvalidaError(ValueError):
     """Se lanza cuando se intenta vender más de lo disponible en los lotes FIFO."""
 
 
-# Float noise left when a sale consumes several lots (90.485243 - 84.575791 =
-# 5.909452000000002): below this, a remainder is not a real quantity
+# Float noise left when a sale consumes several lots (10.8 - 10.1 =
+# 0.7000000000000011): below this, a remainder is not a real quantity
 TOLERANCIA_CANTIDAD = 1e-9
 
 

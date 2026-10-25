@@ -108,6 +108,15 @@ def _validar_cabecera(registro: list[str]) -> list[str]:
     return columnas
 
 
+def _mensaje_error_csv(error: csv.Error) -> str:
+    if "field larger than field limit" in str(error):
+        return (
+            "El CSV no se puede leer: tiene un campo demasiado largo "
+            "o una comilla sin cerrar"
+        )
+    return f"El CSV no se puede leer: {error}"
+
+
 def leer_csv(contenido: str, delimitador: str | None) -> TablaCsv:
     """Parse the file: first non-empty line is the header, blank lines skipped."""
     texto = contenido.lstrip("\ufeff")
@@ -118,19 +127,22 @@ def leer_csv(contenido: str, delimitador: str | None) -> TablaCsv:
     reader = csv.reader(io.StringIO(texto, newline=""), delimiter=delim)
     columnas: list[str] | None = None
     filas: list[FilaCsv] = []
-    for registro in reader:
-        if not any(celda.strip() for celda in registro):
-            continue
-        if columnas is None:
-            columnas = _validar_cabecera(registro)
-            continue
-        if len(filas) == MAX_FILAS:
-            raise ImportacionError(f"El CSV supera el máximo de {MAX_FILAS} filas")
-        valores = {
-            col: registro[i].strip() if i < len(registro) else ""
-            for i, col in enumerate(columnas)
-        }
-        filas.append(FilaCsv(linea=reader.line_num, valores=valores))
+    try:
+        for registro in reader:
+            if not any(celda.strip() for celda in registro):
+                continue
+            if columnas is None:
+                columnas = _validar_cabecera(registro)
+                continue
+            if len(filas) == MAX_FILAS:
+                raise ImportacionError(f"El CSV supera el máximo de {MAX_FILAS} filas")
+            valores = {
+                col: registro[i].strip() if i < len(registro) else ""
+                for i, col in enumerate(columnas)
+            }
+            filas.append(FilaCsv(linea=reader.line_num, valores=valores))
+    except csv.Error as error:
+        raise ImportacionError(_mensaje_error_csv(error)) from None
 
     if columnas is None or not filas:
         raise ImportacionError("El CSV no tiene filas de datos")
@@ -339,7 +351,7 @@ class _MovimientoSimulado:
 
 
 def formatear_cantidad(valor: float) -> str:
-    """19.5432430 -> '19.543243', 0.0 -> '0'."""
+    """21.6543210 -> '21.654321', 0.0 -> '0'."""
     texto = f"{valor:.10f}".rstrip("0").rstrip(".")
     return texto if texto not in ("", "-0") else "0"
 
@@ -425,8 +437,9 @@ async def planificar(
         enriquecer: fetches metadata of an unknown ISIN (None when not found).
             Called at most once per ISIN; an exception counts as not found.
 
-    Rows are processed by (fecha, linea). A sale is checked against the FIFO
-    position of the stored movements plus the rows accepted before it.
+    Duplicate IDs are decided by file line: the first line with an ID wins.
+    Then rows are processed by (fecha, linea): a sale is checked against the
+    FIFO position of the stored movements plus the rows accepted before it.
     """
     planes: dict[int, FilaPlan] = {}
     normalizadas: list[FilaNormalizada] = []
@@ -441,10 +454,14 @@ async def planificar(
     enriquecidos: dict[str, dict | None] = {}
     historial = {isin: list(movs) for isin, movs in movimientos_existentes.items()}
     referencias_vistas: set[str] = set()
+    motivos_referencia = {
+        fila.linea: _motivo_referencia(fila, referencias_vistas, referencias_existentes)
+        for fila in sorted(normalizadas, key=lambda f: f.linea)
+    }
 
     for fila in sorted(normalizadas, key=lambda f: (f.fecha, f.linea)):
         nombre = nombres_conocidos.get(fila.isin)
-        motivo = _motivo_referencia(fila, referencias_vistas, referencias_existentes)
+        motivo = motivos_referencia[fila.linea]
 
         if motivo is None and fila.isin not in nombres_conocidos:
             datos = await _enriquecer_una_vez(fila.isin, enriquecidos, enriquecer)
