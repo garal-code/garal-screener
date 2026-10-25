@@ -1,6 +1,17 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, declarative_base, mapped_column, relationship
 
 Base = declarative_base()
@@ -22,6 +33,9 @@ class User(Base):
     carteras: Mapped[list["Cartera"]] = relationship("Cartera", back_populates="owner")
     reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
         "PasswordResetToken", back_populates="user", cascade="all, delete-orphan"
+    )
+    plantillas_importacion: Mapped[list["PlantillaImportacion"]] = relationship(
+        "PlantillaImportacion", back_populates="user", cascade="all, delete-orphan"
     )
 
 
@@ -79,6 +93,14 @@ class Instrumento(Base):
 
 class Movimiento(Base):
     __tablename__ = "movimientos"
+    # A broker ID is imported at most once per cartera (NULLs never collide)
+    __table_args__ = (
+        UniqueConstraint(
+            "cartera_id",
+            "referencia_externa",
+            name="uq_movimientos_cartera_referencia_externa",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     cartera_id: Mapped[int] = mapped_column(
@@ -94,9 +116,35 @@ class Movimiento(Base):
         Float
     )  # opcional, EUR/moneda en la fecha
     notas: Mapped[str | None] = mapped_column(Text)
+    # Broker transaction ID when the movement comes from a CSV import
+    referencia_externa: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now())
 
     cartera: Mapped["Cartera"] = relationship("Cartera", back_populates="movimientos")
     instrumento: Mapped["Instrumento"] = relationship(
         "Instrumento", back_populates="movimientos"
     )
+
+
+class PlantillaImportacion(Base):
+    """Saved CSV column mapping of one user (see schemas.PlantillaConfig)."""
+
+    __tablename__ = "plantillas_importacion"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "nombre", name="uq_plantillas_importacion_user_nombre"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    nombre: Mapped[str] = mapped_column(String)
+    config: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.now, onupdate=datetime.now
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="plantillas_importacion")

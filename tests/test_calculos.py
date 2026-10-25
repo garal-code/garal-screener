@@ -103,6 +103,26 @@ class TestCalcularPosicionFifo:
         with pytest.raises(VentaInvalidaError):
             calcular_posicion_fifo(movs)
 
+    def test_venta_total_con_ruido_de_coma_flotante(self):
+        # 10.8 - 10.1 = 0.7000000000000011 in float: selling the whole
+        # position must not leave an uncoverable sliver
+        movs = [
+            compra(1, D1, 10.1, 40.0),
+            compra(2, D2, 0.7, 41.0),
+            venta(3, D3, 10.8, 42.0),
+        ]
+        resultado = calcular_posicion_fifo(movs)
+        assert resultado["cantidad_actual"] == 0
+        assert resultado["lotes_pendientes"] == []
+
+    def test_venta_que_supera_por_poco_mas_que_ruido_lanza_error(self):
+        movs = [
+            compra(1, D1, 5, 100.0),
+            venta(2, D2, 5.000001, 100.0),
+        ]
+        with pytest.raises(VentaInvalidaError):
+            calcular_posicion_fifo(movs)
+
     def test_orden_deterministico_mismo_dia(self):
         """Dos compras en el mismo día → la de id menor se consume primero."""
         movs = [
