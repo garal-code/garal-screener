@@ -61,7 +61,7 @@ class Cartera(Base):
     nombre: Mapped[str] = mapped_column(String)
     descripcion: Mapped[str | None] = mapped_column(Text)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     owner: Mapped["User"] = relationship("User", back_populates="carteras")
     # cascade="all, delete-orphan" -> al borrar cartera se borran sus movimientos
@@ -83,7 +83,7 @@ class Instrumento(Base):
     moneda: Mapped[str | None] = mapped_column(String)  # EUR, USD, JPY...
     exchange: Mapped[str | None] = mapped_column(String)  # NYSE, BME, XETRA...
     updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime, default=datetime.now(), onupdate=datetime.now()
+        DateTime, default=datetime.now, onupdate=datetime.now
     )
 
     movimientos: Mapped[list["Movimiento"]] = relationship(
@@ -118,7 +118,7 @@ class Movimiento(Base):
     notas: Mapped[str | None] = mapped_column(Text)
     # Broker transaction ID when the movement comes from a CSV import
     referencia_externa: Mapped[str | None] = mapped_column(String)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     cartera: Mapped["Cartera"] = relationship("Cartera", back_populates="movimientos")
     instrumento: Mapped["Instrumento"] = relationship(

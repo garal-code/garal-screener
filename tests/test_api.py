@@ -30,6 +30,14 @@ class TestCarteras:
         assert data["nombre"] == "Mi cartera"
         assert "id" in data
 
+    def test_created_at_es_el_momento_de_la_creacion(self, auth_client):
+        # The default must be evaluated per row, not once at import time
+        antes = datetime.now()
+        r = auth_client.post(f"{BASE}/carteras", json={"nombre": "Nueva"})
+        despues = datetime.now()
+        assert r.status_code == 200
+        assert antes <= datetime.fromisoformat(r.json()["created_at"]) <= despues
+
     def test_crear_cartera_con_descripcion(self, auth_client):
         r = auth_client.post(
             f"{BASE}/carteras",
@@ -136,6 +144,25 @@ class TestMovimientos:
         data = r.json()
         assert data["tipo"] == "compra"
         assert data["instrumento"]["isin"] == "US0378331005"
+
+    def test_created_at_es_el_momento_de_la_creacion(self, auth_client):
+        cartera_id = self._cartera_id(auth_client)
+        antes = datetime.now()
+        with mock_precios():
+            r = auth_client.post(
+                f"{BASE}/movimientos",
+                json={
+                    "cartera_id": cartera_id,
+                    "isin": "US0378331005",
+                    "tipo": "compra",
+                    "fecha": "2024-01-15",
+                    "cantidad": 1,
+                    "precio": 180.0,
+                },
+            )
+        despues = datetime.now()
+        assert r.status_code == 200
+        assert antes <= datetime.fromisoformat(r.json()["created_at"]) <= despues
 
     def test_isin_se_normaliza_a_mayusculas(self, auth_client):
         cartera_id = self._cartera_id(auth_client)
